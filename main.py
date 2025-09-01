@@ -26,24 +26,28 @@ def load_data(uploaded_file, skiprows=0):
         st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
         return None
 
-def get_latest_prices(purchase_df):
+def get_latest_prices(purchase_df, date_col, item_code_col, price_col):
     """
-    구매 데이터에서 품목별 최신 단가를 추출합니다.
+    사용자가 지정한 열을 기준으로 품목별 최신 단가를 추출합니다.
     """
     purchase_df_copy = purchase_df.copy()
-    purchase_df_copy['일자-No.'] = purchase_df_copy['일자-No.'].astype(str)
-    purchase_df_copy['date'] = purchase_df_copy['일자-No.'].apply(lambda x: x.split('-')[0])
-    purchase_df_copy['date'] = pd.to_datetime(purchase_df_copy['date'], errors='coerce')
-    purchase_df_copy.dropna(subset=['date'], inplace=True)
+    
+    # 날짜 데이터 처리
+    purchase_df_copy['date_for_sorting'] = purchase_df_copy[date_col].astype(str).str.split('-').str[0]
+    purchase_df_copy['date_for_sorting'] = pd.to_datetime(purchase_df_copy['date_for_sorting'], errors='coerce')
+    purchase_df_copy.dropna(subset=['date_for_sorting'], inplace=True)
+    
     # 단가 컬럼을 숫자로 변환
-    purchase_df_copy['단가'] = pd.to_numeric(purchase_df_copy['단가'], errors='coerce').fillna(0)
-    purchase_df_copy = purchase_df_copy.sort_values(by='date', ascending=False)
-    latest_prices = purchase_df_copy.drop_duplicates(subset='품목코드', keep='first')
-    return latest_prices.set_index('품목코드')['단가'].to_dict()
+    purchase_df_copy[price_col] = pd.to_numeric(purchase_df_copy[price_col], errors='coerce').fillna(0)
+    
+    purchase_df_copy = purchase_df_copy.sort_values(by='date_for_sorting', ascending=False)
+    latest_prices = purchase_df_copy.drop_duplicates(subset=item_code_col, keep='first')
+    
+    return latest_prices.set_index(item_code_col)[price_col].to_dict()
 
 def calculate_multi_level_bom_costs(bom_df, latest_prices):
     """
-    검증된 최종 안정화 로직으로 다단계 BOM 원가를 계산합니다.
+    가장 안정적인 방식으로 다단계 BOM 원가를 계산합니다.
     """
     unit_costs = latest_prices.copy()
 
@@ -74,12 +78,10 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
     details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs).fillna(0)
     details_df['부품별 원가'] = details_df['소요량'] * details_df['부품 단위 원가']
     
-    uncalculated_df = summary_df[(summary_df['계산된 단위 원가'] == 0) & (summary_df['생산품목코드'].isin(bom_df['생산품목코드']))]
-    
-    return summary_df, details_df, uncalculated_df
+    return summary_df, details_df
 
 def main():
-    st.title('BOM 원가 계산기 (최종 안정화 버전) 🚀')
+    st.title('BOM 원가 계산기 (열 선택 기능) 🚀')
 
     st.header('1. 파일 업로드')
     bom_file = st.file_uploader("BOM 데이터 (CSV 또는 Excel)", type=['csv', 'xlsx'])
@@ -90,30 +92,44 @@ def main():
         purchase_df = load_data(purchase_file)
 
         if bom_df_raw is not None and purchase_df is not None:
-            bom_df = bom_df_raw[bom_df_raw['소모품목코드'] != '99701'].copy()
-            st.info("'test'(99701) 품목을 BOM 분석에서 제외했습니다.")
+            st.header('2. 구매 데이터 열 선택')
+            st.write("업로드하신 **구매 기록 데이터** 파일에서 어떤 열이 어떤 정보를 담고 있는지 지정해주세요.")
+            
+            purchase_cols = purchase_df.columns.tolist()
+            # 사용자가 열을 선택하도록 위젯 배치
+            date_col = st.selectbox("날짜 정보가 있는 열을 선택하세요:", purchase_cols, index=0)
+            item_code_col = st.selectbox("품목 코드가 있는 열을 선택하세요:", purchase_cols, index=1)
+            price_col = st.selectbox("단가 정보가 있는 열을 선택하세요:", purchase_cols, index=5)
 
-            st.header('2. 원가 계산 실행')
+            st.header('3. 원가 계산 실행')
             if st.button('모든 완제품 원가 계산하기'):
                 with st.spinner('최종 로직으로 전체 원가를 계산 중입니다...'):
-                    latest_prices = get_latest_prices(purchase_df)
-                    summary_df, details_df, uncalculated_df = calculate_multi_level_bom_costs(bom_df, latest_prices)
+                    # 'test' 품목 제외
+                    bom_df = bom_df_raw[bom_df_raw['소모품목코드'] != '99701'].copy()
+                    
+                    # 사용자가 선택한 열 이름을 바탕으로 최신 단가 추출
+                    latest_prices = get_latest_prices(purchase_df, date_col, item_code_col, price_col)
+                    
+                    summary_df, details_df = calculate_multi_level_bom_costs(bom_df, latest_prices)
                     finished_goods_summary = summary_df[summary_df['생산품목명'].str.contains('[완제품]', regex=False, na=False)]
 
-                    st.header('3. [완제품] 원가 계산 결과 요약')
+                    st.header('4. [완제품] 원가 계산 결과 요약')
                     st.dataframe(finished_goods_summary[['생산품목코드', '생산품목명', '계산된 단위 원가']].rename(columns={'생산품목코드':'품목코드', '생산품목명':'품목명'}).style.format({'계산된 단위 원가': '{:,.2f}'}))
 
+                    # 원가 0원 항목 분석
+                    uncalculated_df = finished_goods_summary[finished_goods_summary['계산된 단위 원가'] == 0]
                     if not uncalculated_df.empty:
                         with st.expander("⚠️ 원가 0원 항목 분석 (클릭하여 확인)"):
                             st.write("아래 품목들은 구성 부품의 원가 정보가 없어 원가가 0으로 계산되었습니다.")
                             st.dataframe(uncalculated_df[['생산품목코드', '생산품목명']].rename(columns={'생산품목코드':'품목코드', '생산품목명':'품목명'}))
 
+                    # 엑셀 다운로드
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
                         finished_goods_summary.to_excel(writer, index=False, sheet_name='완제품 원가 요약')
                         details_df.to_excel(writer, index=False, sheet_name='전체 상세 원가 내역')
                     
-                    st.header('4. 결과 다운로드')
+                    st.header('5. 결과 다운로드')
                     st.download_button(
                         label="[완제품] 원가 계산 결과 다운로드 (Excel)",
                         data=output.getvalue(),
