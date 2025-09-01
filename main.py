@@ -227,44 +227,78 @@ def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
         st.error(f"❌ BOM 데이터 정제 오류: {e}")
         return pd.DataFrame()
 
-def calculate_product_cost(product_code: str, bom_df: pd.DataFrame, all_costs: Dict[str, float], cache: Dict[str, float]) -> float:
-    """단일 제품 원가 계산"""
+def calculate_product_cost_with_reason(product_code: str, bom_df: pd.DataFrame, all_costs: Dict[str, float], cache: Dict[str, float]) -> Tuple[float, str]:
+    """단일 제품 원가 계산 + 실패 이유 분석"""
     try:
         # 캐시 확인
         if product_code in cache:
-            return cache[product_code]
+            return cache[product_code], ""
         
         # BOM 구성요소 가져오기
         components = bom_df[bom_df['생산품목코드'] == product_code]
         
         if components.empty:
             cache[product_code] = 0.0
-            return 0.0
+            return 0.0, "BOM 구성요소 없음"
         
         total_cost = 0.0
+        missing_components = []
+        zero_price_components = []
+        invalid_quantity_components = []
         
         for _, comp in components.iterrows():
             comp_code = comp['소모품목코드']
+            comp_name = comp['소모품목명']
             quantity = float(comp['소요량'])
+            
+            # 수량 검증
+            if quantity <= 0:
+                invalid_quantity_components.append(f"{comp_name}({comp_code})")
+                continue
             
             # 부품 단가 찾기
             if comp_code in all_costs:
                 unit_price = all_costs[comp_code]
+                if unit_price <= 0:
+                    zero_price_components.append(f"{comp_name}({comp_code})")
+                    continue
             elif comp_code in bom_df['생산품목코드'].values:
                 # 재귀 계산
-                unit_price = calculate_product_cost(comp_code, bom_df, all_costs, cache)
+                unit_price, _ = calculate_product_cost_with_reason(comp_code, bom_df, all_costs, cache)
+                if unit_price <= 0:
+                    missing_components.append(f"{comp_name}({comp_code})")
+                    continue
                 all_costs[comp_code] = unit_price
             else:
-                unit_price = 0.0
+                missing_components.append(f"{comp_name}({comp_code})")
+                continue
             
             total_cost += quantity * unit_price
         
         cache[product_code] = total_cost
-        return total_cost
+        
+        # 실패 이유 분석
+        if total_cost == 0:
+            reasons = []
+            if missing_components:
+                reasons.append(f"단가정보 없음: {', '.join(missing_components[:3])}{'...' if len(missing_components) > 3 else ''}")
+            if zero_price_components:
+                reasons.append(f"단가 0원: {', '.join(zero_price_components[:3])}{'...' if len(zero_price_components) > 3 else ''}")
+            if invalid_quantity_components:
+                reasons.append(f"수량 오류: {', '.join(invalid_quantity_components[:3])}{'...' if len(invalid_quantity_components) > 3 else ''}")
+            
+            failure_reason = " | ".join(reasons) if reasons else "알 수 없는 이유"
+            return 0.0, failure_reason
+        
+        return total_cost, ""
         
     except Exception as e:
-        st.error(f"❌ {product_code} 계산 오류: {e}")
-        return 0.0
+        return 0.0, f"계산 오류: {str(e)}"
+
+def calculate_product_cost(product_code: str, bom_df: pd.DataFrame, all_costs: Dict[str, float], cache: Dict[str, float]) -> float:
+    """단일 제품 원가 계산 (호환성 유지용)"""
+    cost, _ = calculate_product_cost_with_reason(product_code, bom_df, all_costs, cache)
+    return cost
 
 def calculate_all_bom_costs(bom_df: pd.DataFrame, purchase_prices: Dict[str, float]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """전체 BOM 원가 계산"""
@@ -285,6 +319,7 @@ def calculate_all_bom_costs(bom_df: pd.DataFrame, purchase_prices: Dict[str, flo
         # 전체 원가 딕셔너리
         all_costs = purchase_prices.copy()
         calc_cache = {}
+        failure_reasons = {}  # 실패 이유 저장
         
         # 계산 실행
         results = []
@@ -300,13 +335,19 @@ def calculate_all_bom_costs(bom_df: pd.DataFrame, purchase_prices: Dict[str, flo
             product_name = product['생산품목명']
             
             # 원가 계산
-            calculated_cost = calculate_product_cost(product_code, clean_bom, all_costs, calc_cache)
+            calculated_cost, failure_reason = calculate_product_cost_with_reason(
+                product_code, clean_bom, all_costs, calc_cache
+            )
+            
+            if calculated_cost == 0 and failure_reason:
+                failure_reasons[product_code] = failure_reason
             
             results.append({
                 '생산품목코드': product_code,
                 '생산품목명': product_name,
                 '계산된단위원가': calculated_cost,
-                '계산상태': '계산완료' if calculated_cost > 0 else '계산불가'
+                '계산상태': '계산완료' if calculated_cost > 0 else '계산불가',
+                '실패이유': failure_reasons.get(product_code, '')
             })
             
             # 진행률 업데이트
@@ -362,15 +403,156 @@ def create_simple_chart(df: pd.DataFrame) -> None:
     except Exception:
         pass  # 차트 실패해도 진행
 
+def auto_adjust_column_width(worksheet, df: pd.DataFrame, start_row: int = 1):
+    """엑셀 컬럼 너비 자동 조정"""
+    try:
+        from openpyxl.utils import get_column_letter
+        
+        for idx, column in enumerate(df.columns):
+            column_letter = get_column_letter(idx + 1)
+            
+            # 헤더 길이
+            header_length = len(str(column))
+            
+            # 데이터 최대 길이
+            if not df.empty:
+                max_data_length = df[column].astype(str).str.len().max()
+            else:
+                max_data_length = 0
+            
+            # 최적 너비 계산 (한글 고려)
+            max_length = max(header_length, max_data_length)
+            
+            # 한글 문자가 많은 경우 추가 공간
+            if any('\uac00' <= char <= '\ud7af' for char in str(column)):
+                max_length = max_length * 1.3  # 한글은 30% 더
+            
+            # 최소/최대 너비 제한
+            adjusted_width = min(max(max_length + 2, 10), 60)
+            
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+            
+    except Exception as e:
+        st.warning(f"컬럼 너비 조정 실패: {e}")
+
+def apply_excel_styling(worksheet, df: pd.DataFrame, sheet_title: str = ""):
+    """엑셀 스타일링 적용"""
+    try:
+        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        
+        # 색상 정의
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        title_fill = PatternFill(start_color="E8F4FD", end_color="E8F4FD", fill_type="solid")
+        
+        header_font = Font(color="FFFFFF", bold=True, size=11)
+        title_font = Font(bold=True, size=14, color="1F4E79")
+        data_font = Font(size=10)
+        
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'), 
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        # 제목 스타일 (A1 셀)
+        if sheet_title:
+            title_cell = worksheet.cell(row=1, column=1)
+            title_cell.value = sheet_title
+            title_cell.font = title_font
+            title_cell.fill = title_fill
+            title_cell.alignment = Alignment(horizontal='center', vertical='center')
+            
+            # 제목 셀 병합
+            worksheet.merge_cells(start_row=1, end_row=1, start_column=1, end_column=len(df.columns))
+        
+        # 헤더 스타일 (2행 또는 1행)
+        header_row = 2 if sheet_title else 1
+        
+        for col in range(1, len(df.columns) + 1):
+            header_cell = worksheet.cell(row=header_row, column=col)
+            header_cell.font = header_font
+            header_cell.fill = header_fill
+            header_cell.alignment = Alignment(horizontal='center', vertical='center')
+            header_cell.border = thin_border
+        
+        # 데이터 영역 스타일
+        start_data_row = header_row + 1
+        end_data_row = start_data_row + len(df) - 1
+        
+        for row in range(start_data_row, end_data_row + 1):
+            for col in range(1, len(df.columns) + 1):
+                cell = worksheet.cell(row=row, column=col)
+                cell.font = data_font
+                cell.border = thin_border
+                cell.alignment = Alignment(vertical='center')
+                
+                # 숫자 컬럼 우측 정렬
+                column_name = df.columns[col-1]
+                if '원가' in column_name or '단가' in column_name or '수량' in column_name:
+                    cell.alignment = Alignment(horizontal='right', vertical='center')
+                    
+                    # 숫자 포맷
+                    if isinstance(cell.value, (int, float)) and cell.value != 0:
+                        cell.number_format = '#,##0'
+        
+        # 행 높이 조정
+        worksheet.row_dimensions[header_row].height = 25
+        for row in range(start_data_row, end_data_row + 1):
+            worksheet.row_dimensions[row].height = 20
+            
+    except Exception as e:
+        st.warning(f"스타일 적용 실패: {e}")
+
 def export_to_excel(finished_goods: pd.DataFrame, all_results: pd.DataFrame, details: pd.DataFrame) -> bytes:
-    """간단한 엑셀 내보내기"""
+    """향상된 엑셀 내보내기 (자동 컬럼 조정 + 스타일링)"""
     try:
         output = io.BytesIO()
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            finished_goods.to_excel(writer, sheet_name='완제품원가', index=False)
-            all_results.to_excel(writer, sheet_name='전체제품원가', index=False)
-            details.to_excel(writer, sheet_name='상세내역', index=False)
+            # 1. 완제품 원가 시트
+            finished_display = finished_goods.copy()
+            
+            # 실패 이유가 있는 경우 컬럼명 변경
+            if '실패이유' in finished_display.columns:
+                finished_display = finished_display[['생산품목코드', '생산품목명', '계산된단위원가', '계산상태', '실패이유']]
+                finished_display.columns = ['품목코드', '품목명', '단위원가(원)', '계산상태', '실패이유']
+            else:
+                finished_display = finished_display[['생산품목코드', '생산품목명', '계산된단위원가', '계산상태']]
+                finished_display.columns = ['품목코드', '품목명', '단위원가(원)', '계산상태']
+            
+            # 데이터 쓰기 (제목용 공간 확보)
+            finished_display.to_excel(writer, sheet_name='완제품원가', index=False, startrow=1)
+            
+            # 2. 전체 제품 원가 시트
+            all_display = all_results.copy()
+            if '실패이유' in all_display.columns:
+                all_display = all_display[['생산품목코드', '생산품목명', '계산된단위원가', '계산상태', '실패이유']]
+                all_display.columns = ['품목코드', '품목명', '단위원가(원)', '계산상태', '실패이유']
+            
+            all_display.to_excel(writer, sheet_name='전체제품원가', index=False, startrow=1)
+            
+            # 3. 상세 내역 시트
+            details_display = details.copy()
+            details_cols = ['생산품목코드', '생산품목명', '소모품목코드', '소모품목명', '소요량', '부품단가', '부품별원가']
+            details_display = details_display[details_cols]
+            details_display.columns = ['생산품목코드', '생산품목명', '부품코드', '부품명', '소요량', '부품단가(원)', '부품원가(원)']
+            
+            details_display.to_excel(writer, sheet_name='상세내역', index=False, startrow=1)
+            
+            # 각 시트에 스타일링 적용
+            worksheets = [
+                (writer.sheets['완제품원가'], finished_display, '완제품 BOM 원가 계산 결과'),
+                (writer.sheets['전체제품원가'], all_display, '전체 제품 원가 계산 결과'),
+                (writer.sheets['상세내역'], details_display, 'BOM 구성요소별 상세 원가 내역')
+            ]
+            
+            for worksheet, df_data, title in worksheets:
+                # 컬럼 너비 자동 조정
+                auto_adjust_column_width(worksheet, df_data, start_row=2)
+                
+                # 스타일링 적용
+                apply_excel_styling(worksheet, df_data, title)
         
         return output.getvalue()
         
@@ -490,8 +672,13 @@ def main():
             
             # 결과 테이블
             if not finished_goods.empty:
-                display_df = finished_goods[['생산품목코드', '생산품목명', '계산된단위원가', '계산상태']].copy()
-                display_df.columns = ['품목코드', '품목명', '단위원가(원)', '상태']
+                # 실패 이유 포함한 컬럼 구성
+                if '실패이유' in finished_goods.columns:
+                    display_df = finished_goods[['생산품목코드', '생산품목명', '계산된단위원가', '계산상태', '실패이유']].copy()
+                    display_df.columns = ['품목코드', '품목명', '단위원가(원)', '상태', '실패이유']
+                else:
+                    display_df = finished_goods[['생산품목코드', '생산품목명', '계산된단위원가', '계산상태']].copy()
+                    display_df.columns = ['품목코드', '품목명', '단위원가(원)', '상태']
                 
                 # 스타일링
                 def highlight_rows(row):
@@ -505,6 +692,34 @@ def main():
                 })
                 
                 st.dataframe(styled_df, use_container_width=True, height=400)
+                
+                # 실패 이유 분석 요약
+                failed_items = finished_goods[finished_goods['계산상태'] == '계산불가']
+                if not failed_items.empty and '실패이유' in failed_items.columns:
+                    st.subheader("⚠️ 계산 실패 원인 분석")
+                    
+                    # 실패 이유별 통계
+                    failure_stats = {}
+                    for _, item in failed_items.iterrows():
+                        reasons = item['실패이유'].split(' | ')
+                        for reason in reasons:
+                            main_reason = reason.split(':')[0] if ':' in reason else reason
+                            failure_stats[main_reason] = failure_stats.get(main_reason, 0) + 1
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**실패 원인별 제품 수:**")
+                        for reason, count in failure_stats.items():
+                            st.write(f"• {reason}: {count}개")
+                    
+                    with col2:
+                        st.write("**주요 개선 방향:**")
+                        if '단가정보 없음' in failure_stats:
+                            st.write("• 구매 데이터에 누락된 품목의 단가 정보 보완 필요")
+                        if '단가 0원' in failure_stats:
+                            st.write("• 단가가 0원인 품목의 정확한 단가 입력 필요")
+                        if '수량 오류' in failure_stats:
+                            st.write("• BOM 데이터의 소요량 정보 검토 및 수정 필요")
                 
                 # 원가 분석
                 calculated_items = finished_goods[finished_goods['계산상태'] == '계산완료']
