@@ -3,12 +3,8 @@ import pandas as pd
 import io
 
 def load_data(uploaded_file, skiprows=0):
-    """
-    파일을 불러올 때 모든 데이터를 문자로 읽어와 데이터 타입 불일치 문제를 원천 차단하고,
-    좌우 공백을 제거하여 데이터를 정제합니다.
-    """
+    """파일을 불러와 데이터를 정제합니다."""
     try:
-        # dtype=str 옵션을 사용해 모든 데이터를 문자로 불러옵니다.
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, skiprows=skiprows, encoding='utf-8-sig', dtype=str)
         elif uploaded_file.name.endswith('.xlsx'):
@@ -17,7 +13,7 @@ def load_data(uploaded_file, skiprows=0):
             st.error("지원하지 않는 파일 형식입니다. CSV 또는 XLSX 파일을 업로드해주세요.")
             return None
         
-        # 모든 컬럼의 좌우 공백 제거
+        # 좌우 공백 제거
         for col in df.columns:
             if df[col].dtype == 'object':
                 df[col] = df[col].str.strip()
@@ -26,442 +22,333 @@ def load_data(uploaded_file, skiprows=0):
         st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
         return None
 
-def get_latest_prices(purchase_df):
-    """
-    구매 데이터에서 품목별 최신 단가를 추출합니다.
-    컬럼명을 동적으로 감지하여 처리합니다.
-    """
-    purchase_df_copy = purchase_df.copy()
-    
-    # 컬럼명 동적 감지
+def extract_purchase_prices(purchase_df):
+    """구매 데이터에서 최신 단가를 추출합니다."""
+    # 컬럼명 자동 감지
     date_col = None
     item_code_col = None
     price_col = None
     
-    # 가능한 컬럼명들 확인
-    for col in purchase_df_copy.columns:
-        col_lower = str(col).lower()
-        if '일자' in col_lower and 'no' in col_lower:
+    for col in purchase_df.columns:
+        col_str = str(col).lower()
+        if '일자' in col_str and 'no' in col_str:
             date_col = col
-        elif '품목코드' in col_lower:
+        elif '품목코드' in col_str:
             item_code_col = col
-        elif '단가' in col_lower:
+        elif '단가' in col_str:
             price_col = col
     
-    # 컬럼을 찾지 못한 경우 첫 번째 행이 실제 헤더인지 확인
+    # 컬럼을 찾지 못한 경우 첫 번째 행을 헤더로 사용
     if not all([date_col, item_code_col, price_col]):
-        st.warning("컬럼명을 자동으로 찾지 못했습니다. 첫 번째 데이터 행을 헤더로 사용합니다.")
-        if len(purchase_df_copy) > 0:
-            # 첫 번째 행을 헤더로 설정
-            new_headers = purchase_df_copy.iloc[0].tolist()
-            purchase_df_copy.columns = new_headers
-            purchase_df_copy = purchase_df_copy.iloc[1:].reset_index(drop=True)
+        if len(purchase_df) > 0:
+            new_headers = purchase_df.iloc[0].tolist()
+            purchase_df.columns = new_headers
+            purchase_df = purchase_df.iloc[1:].reset_index(drop=True)
             
             # 다시 컬럼 찾기
-            for col in purchase_df_copy.columns:
-                col_str = str(col)
-                if '일자-No.' in col_str:
+            for col in purchase_df.columns:
+                if '일자-No.' in str(col):
                     date_col = col
-                elif '품목코드' in col_str:
+                elif '품목코드' in str(col):
                     item_code_col = col  
-                elif '단가' in col_str:
+                elif '단가' in str(col):
                     price_col = col
     
-    # 필수 컬럼이 없으면 기본값 사용
-    if not date_col and len(purchase_df_copy.columns) > 0:
-        date_col = purchase_df_copy.columns[0]
-    if not item_code_col and len(purchase_df_copy.columns) > 1:  
-        item_code_col = purchase_df_copy.columns[1]
-    if not price_col and len(purchase_df_copy.columns) > 5:
-        price_col = purchase_df_copy.columns[5]
+    # 기본값 사용
+    if not date_col and len(purchase_df.columns) > 0:
+        date_col = purchase_df.columns[0]
+    if not item_code_col and len(purchase_df.columns) > 1:  
+        item_code_col = purchase_df.columns[1]
+    if not price_col and len(purchase_df.columns) > 5:
+        price_col = purchase_df.columns[5]
     
     st.info(f"사용된 컬럼: 일자={date_col}, 품목코드={item_code_col}, 단가={price_col}")
     
     try:
+        # 데이터 정제
+        df = purchase_df.copy()
+        
         # 일자 처리
         if date_col:
-            purchase_df_copy[date_col] = purchase_df_copy[date_col].astype(str)
-            purchase_df_copy['date'] = purchase_df_copy[date_col].apply(lambda x: str(x).split('-')[0] if '-' in str(x) else str(x))
-            purchase_df_copy['date'] = pd.to_datetime(purchase_df_copy['date'], errors='coerce')
-            purchase_df_copy.dropna(subset=['date'], inplace=True)
+            df['date_str'] = df[date_col].astype(str)
+            df['date'] = df['date_str'].apply(lambda x: str(x).split('-')[0] if '-' in str(x) else str(x))
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df.dropna(subset=['date'])
         
-        # 단가 처리
+        # 단가와 품목코드 처리
         if price_col:
-            purchase_df_copy[price_col] = pd.to_numeric(purchase_df_copy[price_col], errors='coerce').fillna(0)
-        
-        # 품목코드 처리
+            df['price'] = pd.to_numeric(df[price_col], errors='coerce').fillna(0)
         if item_code_col:
-            purchase_df_copy = purchase_df_copy.dropna(subset=[item_code_col])
+            df = df.dropna(subset=[item_code_col])
+            df['item_code'] = df[item_code_col].astype(str).str.strip()
         
-        # 최신 단가 추출
+        # 최신 단가만 추출
         if date_col:
-            purchase_df_copy = purchase_df_copy.sort_values(by='date', ascending=False)
+            df = df.sort_values('date', ascending=False)
         
-        latest_prices = purchase_df_copy.drop_duplicates(subset=item_code_col, keep='first')
-        return latest_prices.set_index(item_code_col)[price_col].to_dict()
+        latest_prices = df.drop_duplicates(subset='item_code', keep='first')
+        
+        # 딕셔너리로 변환 (문자열 키 사용)
+        price_dict = {}
+        for _, row in latest_prices.iterrows():
+            code = row['item_code']
+            price = row['price']
+            if code and pd.notna(price):
+                price_dict[code] = float(price)
+        
+        st.write(f"✅ 구매 데이터에서 {len(price_dict)}개 품목의 단가를 추출했습니다.")
+        return price_dict
         
     except Exception as e:
-        st.error(f"단가 추출 중 오류 발생: {e}")
-        st.write("구매 데이터 컬럼명:", list(purchase_df_copy.columns))
-        st.write("데이터 샘플:", purchase_df_copy.head())
+        st.error(f"단가 추출 중 오류: {e}")
         return {}
 
-def calculate_multi_level_bom_costs(bom_df, latest_prices):
-    """
-    다단계 BOM 원가를 올바르게 계산합니다.
-    중간재(다른 생산품목)도 소모품목으로 사용되는 경우를 처리합니다.
-    """
-    # 0. 필수 컬럼 확인
+def calculate_bom_costs(bom_df, price_dict):
+    """BOM 원가를 계산합니다."""
+    
+    # 필수 컬럼 확인
     required_cols = ['생산품목코드', '생산품목명', '소모품목코드', '소모품목명', '소요량']
     missing_cols = [col for col in required_cols if col not in bom_df.columns]
     
     if missing_cols:
         st.error(f"BOM 데이터에 필수 컬럼이 없습니다: {missing_cols}")
-        st.write("사용 가능한 컬럼:", list(bom_df.columns))
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
+        return pd.DataFrame(), pd.DataFrame()
     
-    # 1. 초기 단가 설정 (구매가만) - 키를 문자열로 통일
-    unit_costs = {str(k).strip(): v for k, v in latest_prices.items()}
+    # 데이터 정제
+    bom_clean = bom_df.copy()
+    bom_clean['생산품목코드'] = bom_clean['생산품목코드'].astype(str).str.strip()
+    bom_clean['소모품목코드'] = bom_clean['소모품목코드'].astype(str).str.strip()
+    bom_clean['소요량'] = pd.to_numeric(bom_clean['소요량'], errors='coerce').fillna(0)
     
-    # 2. 모든 생산품목 목록 (완제품 + 중간재) - 문자열 통일
-    all_products = bom_df[['생산품목코드', '생산품목명']].dropna().drop_duplicates()
-    all_products['생산품목코드'] = all_products['생산품목코드'].astype(str).str.strip()
-    all_products_set = set(all_products['생산품목코드'])
+    # 모든 생산품목 목록
+    all_products = bom_clean[['생산품목코드', '생산품목명']].drop_duplicates().copy()
+    all_products = all_products[all_products['생산품목코드'].notna()].reset_index(drop=True)
     
-    # 3. BOM에서 소모품목으로 사용되는 생산품목들 식별 - 문자열 통일
-    bom_components = set(bom_df['소모품목코드'].dropna().astype(str).str.strip())
-    internal_components = bom_components.intersection(all_products_set)
+    st.write(f"📊 전체 생산품목 수: {len(all_products)}")
+    st.write(f"📊 구매 단가 보유 품목 수: {len(price_dict)}")
     
-    # 4. 소요량 숫자 타입으로 변환
-    bom_df['소요량'] = pd.to_numeric(bom_df['소요량'], errors='coerce').fillna(0)
+    # 단가 딕셔너리 초기화 (구매 단가부터)
+    unit_costs = price_dict.copy()
     
-    # 5. 디버깅 정보 출력
-    st.write(f"📊 **계산 정보**")
-    st.write(f"- 전체 생산품목 수: {len(all_products_set)}")
-    st.write(f"- 구매 데이터에서 찾은 품목 수: {len(latest_prices)}")
-    st.write(f"- BOM 내부에서 중간재로 사용되는 품목 수: {len(internal_components)}")
-    
-    if len(latest_prices) == 0:
-        st.warning("구매 데이터에서 단가 정보를 찾을 수 없습니다. 구매 데이터 형식을 확인해주세요.")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
-    
-    # 6. 반복 계산으로 다단계 BOM 원가 계산
-    max_iterations = len(all_products_set) + 10
-    calculation_log = []
+    # 반복 계산
+    max_iterations = len(all_products) + 5
+    calculation_success = []
     
     for iteration in range(max_iterations):
-        made_progress = False
-        remaining_products = [p for p in all_products_set if p not in unit_costs]
+        progress_made = False
         
-        if not remaining_products:
-            break
+        for _, product_row in all_products.iterrows():
+            product_code = product_row['생산품목코드']
+            product_name = product_row['생산품목명']
             
-        for product_code in remaining_products:
-            product_code = str(product_code).strip()  # 문자열 통일
-            components = bom_df[bom_df['생산품목코드'].astype(str).str.strip() == product_code]
+            # 이미 계산된 제품은 건너뛰기
+            if product_code in unit_costs:
+                continue
+            
+            # 해당 제품의 BOM 구성요소
+            components = bom_clean[bom_clean['생산품목코드'] == product_code]
             
             if components.empty:
                 continue
-                
-            # 모든 소모품목의 원가를 알고 있는지 확인
+            
+            # 모든 구성요소의 단가를 알고 있는지 확인
+            all_components_available = True
             missing_components = []
-            can_calculate = True
             
-            for _, comp_row in components.iterrows():
-                comp_code = str(comp_row['소모품목코드']).strip()  # 문자열 통일
+            for _, comp in components.iterrows():
+                comp_code = comp['소모품목코드']
                 if comp_code not in unit_costs:
+                    all_components_available = False
                     missing_components.append(comp_code)
-                    can_calculate = False
             
-            if can_calculate:
-                # 원가 계산
-                total_cost = 0
-                detail_log = []
+            # 모든 구성요소의 단가를 알고 있으면 계산
+            if all_components_available:
+                total_cost = 0.0
+                component_details = []
                 
-                for _, comp_row in components.iterrows():
-                    comp_code = str(comp_row['소모품목코드']).strip()  # 문자열 통일
-                    comp_name = comp_row['소모품목명']
-                    quantity = comp_row['소요량']
-                    unit_price = unit_costs.get(comp_code, 0)  # get 방식으로 안전하게 접근
-                    component_cost = quantity * unit_price
-                    total_cost += component_cost
+                for _, comp in components.iterrows():
+                    comp_code = comp['소모품목코드']
+                    comp_name = comp['소모품목명']
+                    quantity = float(comp['소요량'])
+                    comp_unit_price = float(unit_costs[comp_code])
+                    comp_total_cost = quantity * comp_unit_price
+                    total_cost += comp_total_cost
                     
-                    detail_log.append(f"  - {comp_name}({comp_code}): {quantity} × {unit_price:,.2f} = {component_cost:,.2f}")
+                    component_details.append({
+                        '부품코드': comp_code,
+                        '부품명': comp_name,
+                        '소요량': quantity,
+                        '단가': comp_unit_price,
+                        '부품원가': comp_total_cost
+                    })
                 
-                # 문자열로 키 저장 (데이터 타입 통일)
-                product_code_str = str(product_code).strip()
-                unit_costs[product_code_str] = total_cost
-                made_progress = True
+                # 계산 결과 저장
+                unit_costs[product_code] = total_cost
+                progress_made = True
                 
-                # 실시간 디버깅: D626E 계산 확인
-                if product_code_str == 'D626E':
-                    st.write(f"🔍 **D626E 계산 완료!**")
-                    st.write(f"  - 계산된 총 원가: {total_cost:,.2f}")
-                    st.write(f"  - unit_costs에 저장됨: {unit_costs.get('D626E', 'NOT_FOUND')}")
-                    st.write(f"  - unit_costs 타입: {type(unit_costs)}")
-                    st.write(f"  - 저장된 키: {product_code_str} (타입: {type(product_code_str)})")
-                
-                # 계산 로그 저장
-                product_name = components.iloc[0]['생산품목명']
-                calculation_log.append({
-                    'iteration': iteration + 1,
-                    'product_code': product_code_str,  # 문자열로 통일
-                    'product_name': product_name,
-                    'total_cost': total_cost,
-                    'details': detail_log
+                calculation_success.append({
+                    '반복차수': iteration + 1,
+                    '제품코드': product_code,
+                    '제품명': product_name,
+                    '총원가': total_cost,
+                    '구성요소': component_details
                 })
+                
+                # 특별 디버깅 - D626E와 비슷한 패턴 확인
+                if 'D626E' in product_code:
+                    st.write(f"🎯 **{product_code} 계산 완료**")
+                    st.write(f"   총 원가: {total_cost:,.2f}원")
+                    st.write(f"   구성요소 {len(component_details)}개")
         
-        # 진전이 없으면 중단
-        if not made_progress:
+        # 더 이상 진전이 없으면 중단
+        if not progress_made:
             break
     
-    # 7. 결과 정리 (디버깅 강화)
-    summary_df = all_products.copy()
+    st.write(f"✅ 총 {len(calculation_success)}개 제품의 원가를 계산했습니다.")
     
-    # 디버깅: unit_costs 내용 확인
-    st.write(f"📊 **unit_costs 상태 확인**:")
-    st.write(f"  - unit_costs 총 개수: {len(unit_costs)}")
-    st.write(f"  - D626E 포함 여부: {'D626E' in unit_costs}")
-    if 'D626E' in unit_costs:
-        st.write(f"  - D626E 값: {unit_costs['D626E']:,.2f}")
+    # 결과 정리
+    result_df = all_products.copy()
     
-    # unit_costs의 키 샘플 확인
-    st.write(f"  - unit_costs 키 샘플: {list(unit_costs.keys())[:10]}")
+    # 단가 매핑 (간단하게)
+    result_df['계산된_단위_원가'] = result_df['생산품목코드'].apply(
+        lambda code: unit_costs.get(code, 0.0)
+    )
     
-    # 생산품목코드 데이터 타입 통일 BEFORE
-    st.write(f"📊 **summary_df 매핑 전 상태**:")
-    st.write(f"  - summary_df 행 수: {len(summary_df)}")
-    st.write(f"  - 생산품목코드 타입: {type(summary_df['생산품목코드'].iloc[0])}")
-    st.write(f"  - D626E 포함 여부: {'D626E' in summary_df['생산품목코드'].values}")
+    # 계산 상태
+    result_df['계산상태'] = result_df['계산된_단위_원가'].apply(
+        lambda cost: '계산완료' if cost > 0 else '계산불가'
+    )
     
-    # 데이터 타입 통일
-    summary_df['생산품목코드'] = summary_df['생산품목코드'].astype(str).str.strip()
-    unit_costs_for_mapping = {str(k).strip(): v for k, v in unit_costs.items()}
+    # 특별 확인: D626E류 제품들
+    d626e_like = result_df[result_df['생산품목코드'].str.contains('D626E', na=False)]
+    if not d626e_like.empty:
+        st.write("🔍 **D626E 계열 제품 확인:**")
+        for _, row in d626e_like.iterrows():
+            code = row['생산품목코드']
+            cost = row['계산된_단위_원가']
+            status = row['계산상태']
+            st.write(f"   {code}: {cost:,.2f}원 ({status})")
     
-    # 매핑 전 최종 확인
-    st.write(f"📊 **매핑 직전 최종 확인**:")
-    st.write(f"  - unit_costs_for_mapping에 D626E: {'D626E' in unit_costs_for_mapping}")
-    st.write(f"  - summary_df에 D626E: {'D626E' in summary_df['생산품목코드'].values}")
+    # 상세 내역 생성
+    details_df = bom_clean.copy()
+    details_df['부품_단가'] = details_df['소모품목코드'].apply(
+        lambda code: unit_costs.get(code, 0.0)
+    )
+    details_df['부품별_원가'] = details_df['소요량'] * details_df['부품_단가']
     
-    if 'D626E' in unit_costs_for_mapping and 'D626E' in summary_df['생산품목코드'].values:
-        st.write(f"  - 매핑 가능: ✅ (값: {unit_costs_for_mapping['D626E']:,.2f})")
-    else:
-        st.write(f"  - 매핑 불가능: ❌")
-        # 키 비교
-        unit_keys_sample = list(unit_costs_for_mapping.keys())[:20]
-        summary_codes_sample = summary_df['생산품목코드'].head(20).tolist()
-        st.write(f"  - unit_costs 키들: {unit_keys_sample}")
-        st.write(f"  - summary_df 코드들: {summary_codes_sample}")
-    
-    # 매핑 실행
-    st.write("🔄 **매핑 실행 중...**")
-    summary_df['계산된 단위 원가'] = summary_df['생산품목코드'].map(unit_costs_for_mapping)
-    
-    # 계산 상태 먼저 결정 (fillna 실행 전에!)
-    summary_df['계산 완료'] = summary_df['계산된 단위 원가'].notna()
-    summary_df['계산 상태'] = summary_df['계산 완료'].map({True: '계산완료', False: '계산불가'})
-    
-    # 매핑 결과 즉시 확인 (fillna 실행 전)
-    if 'D626E' in summary_df['생산품목코드'].values:
-        d626e_row = summary_df[summary_df['생산품목코드'] == 'D626E'].iloc[0]
-        mapped_value = d626e_row['계산된 단위 원가']
-        calculation_status = d626e_row['계산 상태']
-        st.write(f"📊 **D626E 매핑 결과 (fillna 실행 전)**: {mapped_value} (타입: {type(mapped_value)}, 상태: {calculation_status})")
-        
-        if pd.isna(mapped_value):
-            st.error("❌ D626E 매핑 실패! NaN 반환됨")
-        elif mapped_value == 0:
-            st.error("❌ D626E 매핑 결과가 0!")
-        else:
-            st.success(f"✅ D626E 매핑 성공: {mapped_value:,.2f}")
-    
-    # 마지막에 NaN을 0으로 변환 (계산 실패한 것들만)
-    summary_df.loc[summary_df['계산 상태'] == '계산불가', '계산된 단위 원가'] = 0
-    
-    # 최종 결과 다시 확인
-    if 'D626E' in summary_df['생산품목코드'].values:
-        d626e_row = summary_df[summary_df['생산품목코드'] == 'D626E'].iloc[0]
-        final_value = d626e_row['계산된 단위 원가']
-        final_status = d626e_row['계산 상태']
-        st.write(f"📊 **D626E 최종 결과**: {final_value:,.2f} (상태: {final_status})")
-        
-        if final_status == '계산완료' and final_value == 0:
-            st.error("🚨 심각한 오류: 계산완료인데 값이 0입니다!")
-        else:
-            st.success(f"✅ D626E 최종 확인 완료: {final_value:,.2f}")
-    
-    # 상세 내역 (데이터 타입 통일)
-    details_df = bom_df.copy()
-    details_df['소모품목코드'] = details_df['소모품목코드'].astype(str).str.strip()
-    details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs_for_mapping).fillna(0)
-    details_df['부품별 원가'] = details_df['소요량'] * details_df['부품 단위 원가']
-    
-    # D626E의 상세 내역 확인
-    test_code = 'D626E'
-    if test_code in details_df['생산품목코드'].astype(str).str.strip().values:
-        d626e_details = details_df[details_df['생산품목코드'].astype(str).str.strip() == test_code]
-        st.write(f"📊 **D626E 상세 계산 확인**:")
-        st.write(f"  - 구성 부품 수: {len(d626e_details)}")
-        total_calculated = d626e_details['부품별 원가'].sum()
-        st.write(f"  - 상세내역 합계: {total_calculated:,.2f}")
-        
-        # 각 부품별 계산 내역
-        for _, row in d626e_details.iterrows():
-            comp_code = row['소모품목코드']
-            comp_name = row['소모품목명']
-            quantity = row['소요량']
-            unit_price = row['부품 단위 원가']
-            comp_total = row['부품별 원가']
-            st.write(f"    - {comp_name}({comp_code}): {quantity} × {unit_price:,.2f} = {comp_total:,.2f}")
-        
-        # 상세내역 합계와 summary_df 값 비교
-        if test_code in summary_df['생산품목코드'].values:
-            summary_value = summary_df[summary_df['생산품목코드'] == test_code]['계산된 단위 원가'].iloc[0]
-            st.write(f"📊 **값 비교**:")
-            st.write(f"  - 상세내역 합계: {total_calculated:,.2f}")
-            st.write(f"  - summary_df 값: {summary_value:,.2f}")
-            if abs(total_calculated - summary_value) > 0.01:
-                st.error(f"❌ 값이 일치하지 않음! 차이: {abs(total_calculated - summary_value):,.2f}")
-            else:
-                st.success("✅ 값이 일치함!")
-    
-    # 계산되지 않은 항목들 (실제로 계산불가인 항목만)
-    uncalculated_df = summary_df[summary_df['계산 상태'] == '계산불가'].copy()
-    
-    # 계산되지 않은 이유 분석
-    if not uncalculated_df.empty:
-        reason_analysis = []
-        for _, row in uncalculated_df.iterrows():
-            product_code = row['생산품목코드']
-            components = bom_df[bom_df['생산품목코드'] == product_code]['소모품목코드'].tolist()
-            missing_comps = [c for c in components if c not in unit_costs]
-            reason_analysis.append({
-                '품목코드': product_code,
-                '품목명': row['생산품목명'],
-                '부족한 부품 수': len(missing_comps),
-                '부족한 부품들': ', '.join(missing_comps[:3]) + ('...' if len(missing_comps) > 3 else '')
-            })
-        
-        reason_df = pd.DataFrame(reason_analysis)
-        uncalculated_df = uncalculated_df.merge(reason_df, left_on='생산품목코드', right_on='품목코드', how='left')
-    
-    return summary_df, details_df, uncalculated_df, calculation_log
+    return result_df, details_df
 
 def main():
-    st.title('BOM 원가 계산기 (오류 수정 버전) 🚀')
-
+    st.title('🚀 BOM 원가 계산기 (완전 새 버전)')
+    
     st.header('1. 파일 업로드')
-    bom_file = st.file_uploader("BOM 데이터 (CSV 또는 Excel)", type=['csv', 'xlsx'])
-    purchase_file = st.file_uploader("구매 기록 데이터 (CSV 또는 Excel)", type=['csv', 'xlsx'])
-
+    bom_file = st.file_uploader("BOM 데이터 파일", type=['csv', 'xlsx'])
+    purchase_file = st.file_uploader("구매 데이터 파일", type=['csv', 'xlsx'])
+    
     if bom_file and purchase_file:
-        bom_df_raw = load_data(bom_file, skiprows=1)
+        # 데이터 로드
+        bom_df = load_data(bom_file, skiprows=1)
         purchase_df = load_data(purchase_file)
-
-        if bom_df_raw is not None and purchase_df is not None:
+        
+        if bom_df is not None and purchase_df is not None:
             # 데이터 미리보기
-            st.subheader("📋 데이터 미리보기")
+            st.subheader("📋 업로드된 데이터 확인")
             
             col1, col2 = st.columns(2)
             with col1:
                 st.write("**BOM 데이터**")
-                st.write(f"행 수: {len(bom_df_raw)}")
-                st.write("컬럼명:", list(bom_df_raw.columns))
-                st.dataframe(bom_df_raw.head())
-            
+                st.write(f"행 수: {len(bom_df)}, 컬럼 수: {len(bom_df.columns)}")
+                st.dataframe(bom_df.head())
+                
             with col2:
-                st.write("**구매 데이터**") 
-                st.write(f"행 수: {len(purchase_df)}")
-                st.write("컬럼명:", list(purchase_df.columns))
+                st.write("**구매 데이터**")
+                st.write(f"행 수: {len(purchase_df)}, 컬럼 수: {len(purchase_df.columns)}")
                 st.dataframe(purchase_df.head())
             
-            # test 품목 제외 (컬럼이 존재하는 경우에만)
-            if '소모품목코드' in bom_df_raw.columns:
-                bom_df = bom_df_raw[bom_df_raw['소모품목코드'] != '99701'].copy()
-                st.info("'test'(99701) 품목을 BOM 분석에서 제외했습니다.")
+            # test 품목 제거
+            if '소모품목코드' in bom_df.columns:
+                bom_clean = bom_df[bom_df['소모품목코드'] != '99701'].copy()
+                st.info(f"test 품목(99701) 제거: {len(bom_df)} → {len(bom_clean)} 행")
             else:
-                bom_df = bom_df_raw.copy()
-                st.warning("'소모품목코드' 컬럼을 찾을 수 없어 test 품목 제외를 건너뜁니다.")
-
-            st.header('2. 원가 계산 실행')
-            if st.button('모든 완제품 원가 계산하기'):
-                with st.spinner('개선된 로직으로 전체 원가를 계산 중입니다...'):
-                    latest_prices = get_latest_prices(purchase_df)
-                    summary_df, details_df, uncalculated_df, calculation_log = calculate_multi_level_bom_costs(bom_df, latest_prices)
+                bom_clean = bom_df.copy()
+            
+            st.header('2. 원가 계산')
+            if st.button('🔥 완제품 원가 계산 시작!'):
+                with st.spinner('새로운 로직으로 계산 중...'):
+                    # 단가 추출
+                    price_dict = extract_purchase_prices(purchase_df)
+                    
+                    if not price_dict:
+                        st.error("구매 데이터에서 단가를 추출할 수 없습니다.")
+                        return
+                    
+                    # BOM 원가 계산
+                    result_df, details_df = calculate_bom_costs(bom_clean, price_dict)
+                    
+                    if result_df.empty:
+                        st.error("원가 계산에 실패했습니다.")
+                        return
                     
                     # 완제품만 필터링
-                    finished_goods_summary = summary_df[summary_df['생산품목명'].str.contains('[완제품]', regex=False, na=False)].copy()
-
-                    st.header('3. [완제품] 원가 계산 결과 요약')
+                    finished_goods = result_df[
+                        result_df['생산품목명'].str.contains('[완제품]', regex=False, na=False)
+                    ].copy()
                     
-                    # 계산 성공/실패 통계
-                    total_finished = len(finished_goods_summary)
-                    calculated_finished = len(finished_goods_summary[finished_goods_summary['계산 상태'] == '계산완료'])
+                    st.header('3. 🎯 완제품 원가 결과')
+                    
+                    # 통계
+                    total_finished = len(finished_goods)
+                    calculated_finished = len(finished_goods[finished_goods['계산상태'] == '계산완료'])
+                    success_rate = (calculated_finished / total_finished * 100) if total_finished > 0 else 0
                     
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("전체 완제품 수", total_finished)
+                        st.metric("전체 완제품", total_finished)
                     with col2:
-                        st.metric("계산 성공", calculated_finished, f"{calculated_finished/total_finished*100:.1f}%" if total_finished > 0 else "0%")
+                        st.metric("계산 성공", calculated_finished)
                     with col3:
-                        st.metric("계산 실패", total_finished - calculated_finished)
+                        st.metric("성공률", f"{success_rate:.1f}%")
                     
                     # 결과 테이블
-                    display_df = finished_goods_summary[['생산품목코드', '생산품목명', '계산된 단위 원가', '계산 상태']].rename(columns={
-                        '생산품목코드': '품목코드', 
-                        '생산품목명': '품목명'
-                    })
+                    display_cols = ['생산품목코드', '생산품목명', '계산된_단위_원가', '계산상태']
+                    display_df = finished_goods[display_cols].copy()
+                    display_df.columns = ['품목코드', '품목명', '계산된_단위_원가', '상태']
                     
-                    # 계산 상태별로 색상 구분하여 표시
-                    def highlight_status(row):
-                        if row['계산 상태'] == '계산완료':
-                            return ['background-color: #d4edda'] * len(row)
-                        else:
-                            return ['background-color: #f8d7da'] * len(row)
+                    # 스타일 적용
+                    def color_status(row):
+                        colors = []
+                        for col in row.index:
+                            if row['상태'] == '계산완료':
+                                colors.append('background-color: #d4edda')
+                            else:
+                                colors.append('background-color: #f8d7da')
+                        return colors
                     
-                    styled_df = display_df.style.apply(highlight_status, axis=1).format({
-                        '계산된 단위 원가': '{:,.2f}'
+                    styled_df = display_df.style.apply(color_status, axis=1).format({
+                        '계산된_단위_원가': '{:,.2f}'
                     })
                     
                     st.dataframe(styled_df, use_container_width=True)
-
-                    # 계산 과정 로그 표시
-                    if calculation_log:
-                        with st.expander("🔍 계산 과정 상세 로그 (클릭하여 확인)"):
-                            for log_entry in calculation_log[:20]:  # 처음 20개만 표시
-                                st.write(f"**{log_entry['iteration']}차 계산: {log_entry['product_name']}({log_entry['product_code']})**")
-                                st.write(f"총 원가: {log_entry['total_cost']:,.2f}원")
-                                for detail in log_entry['details']:
-                                    st.write(detail)
-                                st.write("---")
-
-                    # 계산 실패 항목 분석
-                    if not uncalculated_df.empty:
-                        with st.expander("⚠️ 원가 계산 실패 항목 분석 (클릭하여 확인)"):
-                            st.write("다음 품목들은 구성 부품의 원가 정보가 부족하여 계산할 수 없었습니다:")
-                            
-                            failed_finished = uncalculated_df[uncalculated_df['생산품목명'].str.contains('[완제품]', regex=False, na=False)]
-                            if not failed_finished.empty:
-                                st.write("**완제품 계산 실패 목록:**")
-                                st.dataframe(failed_finished[['생산품목코드', '생산품목명', '부족한 부품 수', '부족한 부품들']])
-                            
-                            st.write("**전체 계산 실패 목록:**")
-                            st.dataframe(uncalculated_df[['생산품목코드', '생산품목명', '부족한 부품 수', '부족한 부품들']])
-
-                    # 결과 다운로드
+                    
+                    # 실패 항목 분석
+                    failed_items = finished_goods[finished_goods['계산상태'] == '계산불가']
+                    if not failed_items.empty:
+                        with st.expander(f"⚠️ 계산 실패 항목 {len(failed_items)}개"):
+                            st.dataframe(failed_items[['생산품목코드', '생산품목명']])
+                    
+                    # 엑셀 다운로드
+                    st.header('4. 📥 결과 다운로드')
+                    
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        finished_goods_summary.to_excel(writer, index=False, sheet_name='완제품 원가 요약')
-                        summary_df.to_excel(writer, index=False, sheet_name='전체 제품 원가 요약')
-                        details_df.to_excel(writer, index=False, sheet_name='상세 원가 내역')
-                        if not uncalculated_df.empty:
-                            uncalculated_df.to_excel(writer, index=False, sheet_name='계산 실패 항목')
+                        finished_goods.to_excel(writer, sheet_name='완제품_원가', index=False)
+                        result_df.to_excel(writer, sheet_name='전체_제품_원가', index=False)
+                        details_df.to_excel(writer, sheet_name='상세_내역', index=False)
                     
-                    st.header('4. 결과 다운로드')
                     st.download_button(
-                        label="완제품 원가 계산 결과 다운로드 (Excel)",
+                        label="📊 완제품 원가 결과 다운로드 (Excel)",
                         data=output.getvalue(),
-                        file_name='완제품_원가계산_결과_수정본.xlsx',
+                        file_name='BOM_원가계산_결과_새버전.xlsx',
                         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                     )
 
