@@ -70,6 +70,10 @@ def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Op
             st.error("❌ 지원하지 않는 파일 형식")
             return None
         
+        # 헤더 문제 해결 (구매 데이터용)
+        if 'purchase' in file_name.lower() or any('Unnamed:' in str(col) for col in df.columns):
+            df = fix_purchase_data_headers(df)
+        
         # 데이터 정제
         for col in df.select_dtypes(include=['object']).columns:
             df[col] = df[col].astype(str).str.strip()
@@ -82,6 +86,62 @@ def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Op
     except Exception as e:
         st.error(f"❌ 파일 로딩 실패: {e}")
         return None
+
+def fix_purchase_data_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """구매 데이터 헤더 문제 해결"""
+    try:
+        st.info("🔧 구매 데이터 헤더 문제를 감지했습니다. 자동으로 수정합니다...")
+        
+        # 첫 번째 행에서 실제 헤더 찾기
+        potential_headers = None
+        
+        # 0행부터 3행까지 헤더 후보 검색
+        for i in range(min(4, len(df))):
+            row_values = df.iloc[i].fillna('').astype(str).tolist()
+            row_text = ' '.join(row_values)
+            
+            # 헤더의 특징적인 키워드들 확인
+            header_keywords = ['일자', '품목코드', '품목명', '단가', '수량', '거래처']
+            keyword_count = sum(1 for keyword in header_keywords if keyword in row_text)
+            
+            if keyword_count >= 3:  # 3개 이상의 키워드가 있으면 헤더로 판단
+                potential_headers = row_values
+                header_row_idx = i
+                st.info(f"📋 {i}행에서 실제 헤더를 발견했습니다: {keyword_count}개 키워드 매칭")
+                break
+        
+        if potential_headers:
+            # 헤더 정리 및 적용
+            cleaned_headers = []
+            for header in potential_headers:
+                # 헤더명 정리
+                header = str(header).strip()
+                if header in ['', 'nan', 'None']:
+                    # 빈 헤더는 이전 헤더 기반으로 생성
+                    header = f"컬럼_{len(cleaned_headers)+1}"
+                
+                cleaned_headers.append(header)
+            
+            # 새로운 DataFrame 생성
+            new_df = df.iloc[header_row_idx + 1:].copy()  # 헤더 다음 행부터 데이터
+            new_df.columns = cleaned_headers[:len(new_df.columns)]  # 컬럼 수만큼만 헤더 적용
+            new_df = new_df.reset_index(drop=True)
+            
+            # 빈 행 제거
+            new_df = new_df.dropna(how='all')
+            
+            st.success(f"✅ 헤더 수정 완료: {len(cleaned_headers)}개 컬럼, {len(new_df)}행 데이터")
+            st.write("**수정된 헤더:**", cleaned_headers[:10])  # 처음 10개만 표시
+            
+            return new_df
+        
+        else:
+            st.warning("⚠️ 적절한 헤더를 찾을 수 없습니다. 원본 데이터를 사용합니다.")
+            return df
+        
+    except Exception as e:
+        st.error(f"❌ 헤더 수정 중 오류: {e}")
+        return df
 
 def validate_bom_data(df: pd.DataFrame) -> Tuple[bool, str]:
     """BOM 데이터 간단 검증"""
@@ -101,42 +161,73 @@ def validate_bom_data(df: pd.DataFrame) -> Tuple[bool, str]:
         return False, f"검증 오류: {e}"
 
 def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
-    """구매 데이터에서 단가 추출"""
+    """구매 데이터에서 단가 추출 (헤더 문제 해결 포함)"""
     try:
         if df.empty:
             return {}
         
-        # 컬럼 자동 감지
+        st.write("📊 **구매 데이터 분석 중...**")
+        st.write(f"- 원본 컬럼: {list(df.columns)[:5]}...")  # 처음 5개만 표시
+        
+        # 컬럼 자동 감지 (개선된 버전)
         date_col, item_col, price_col = None, None, None
         
-        # 첫 번째 행이 회사명 등이면 건너뛰기
-        first_row = ' '.join([str(v) for v in df.iloc[0].values if pd.notna(v)])
-        if any(word in first_row for word in ['회사명', '기간', '조회']):
-            if len(df) > 1:
-                df.columns = df.iloc[1].fillna('').astype(str)
-                df = df.iloc[2:].reset_index(drop=True)
-        
-        # 컬럼 매칭
+        # 각 컬럼명을 분석하여 매칭
         for col in df.columns:
             col_str = str(col).lower()
-            if '일자' in col_str and not date_col:
-                date_col = col
-            elif '품목코드' in col_str and not item_col:
-                item_col = col
-            elif '단가' in col_str and '공급' not in col_str and not price_col:
-                price_col = col
+            col_original = str(col)
+            
+            # 일자 컬럼 감지
+            if not date_col:
+                if any(keyword in col_str for keyword in ['일자', 'date', '날짜']) or '일자-no' in col_str:
+                    date_col = col
+                    st.info(f"📅 일자 컬럼 발견: '{col_original}'")
+            
+            # 품목코드 컬럼 감지  
+            if not item_col:
+                if '품목코드' in col_str:
+                    item_col = col
+                    st.info(f"🔖 품목코드 컬럼 발견: '{col_original}'")
+            
+            # 단가 컬럼 감지
+            if not price_col:
+                if '단가' in col_str and '공급' not in col_str and '총' not in col_str:
+                    price_col = col
+                    st.info(f"💰 단가 컬럼 발견: '{col_original}'")
         
-        # 기본값
+        # 컬럼을 찾지 못한 경우 인덱스로 대체
         if not date_col and len(df.columns) > 0:
             date_col = df.columns[0]
+            st.warning(f"⚠️ 일자 컬럼을 자동 설정: '{date_col}'")
+            
         if not item_col and len(df.columns) > 1:
             item_col = df.columns[1]
-        if not price_col and len(df.columns) > 5:
-            price_col = df.columns[5]
+            st.warning(f"⚠️ 품목코드 컬럼을 자동 설정: '{item_col}'")
+            
+        if not price_col:
+            # 단가 관련 컬럼 우선 탐색
+            for i, col in enumerate(df.columns):
+                if i >= 3:  # 3번째 컬럼부터
+                    sample_value = str(df[col].dropna().iloc[0] if not df[col].dropna().empty else '')
+                    # 숫자로 변환 가능한 컬럼 찾기
+                    try:
+                        float(sample_value.replace(',', ''))
+                        price_col = col
+                        st.warning(f"⚠️ 단가 컬럼을 추정 설정: '{col}' (샘플값: {sample_value})")
+                        break
+                    except:
+                        continue
+            
+            # 그래도 없으면 기본값
+            if not price_col and len(df.columns) > 5:
+                price_col = df.columns[5]
+                st.warning(f"⚠️ 단가 컬럼을 기본 설정: '{price_col}'")
         
         if not all([date_col, item_col, price_col]):
-            st.warning("⚠️ 필요한 컬럼을 찾을 수 없습니다")
+            st.error(f"❌ 필수 컬럼을 찾을 수 없습니다. 일자: {date_col}, 품목코드: {item_col}, 단가: {price_col}")
             return {}
+        
+        st.success(f"✅ 컬럼 매핑 완료 - 일자: {date_col}, 품목코드: {item_col}, 단가: {price_col}")
         
         # 데이터 정제
         work_df = df[[date_col, item_col, price_col]].copy()
@@ -158,6 +249,7 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
         ]
         
         if work_df.empty:
+            st.error("❌ 유효한 구매 데이터가 없습니다.")
             return {}
         
         # 날짜 처리 (간단하게)
@@ -166,8 +258,9 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
             work_df['date_parsed'] = pd.to_datetime(work_df['date_str'], errors='coerce')
             work_df = work_df.dropna(subset=['date_parsed'])
             work_df = work_df.sort_values('date_parsed', ascending=False)
+            st.info("📅 날짜순 정렬 완료")
         except:
-            pass  # 날짜 정렬 실패해도 계속 진행
+            st.warning("⚠️ 날짜 정렬 실패, 원본 순서 유지")
         
         # 최신 단가 추출
         latest_prices = work_df.drop_duplicates(subset='item_code', keep='first')
@@ -179,6 +272,11 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
             price = row['price']
             if pd.notna(price) and price > 0:
                 price_dict[code] = float(price)
+        
+        st.write(f"**구매단가 샘플 (처음 5개):**")
+        sample_items = list(price_dict.items())[:5]
+        for code, price in sample_items:
+            st.write(f"  • {code}: {price:,.0f}원")
         
         return price_dict
         
