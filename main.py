@@ -120,15 +120,16 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
         st.write("사용 가능한 컬럼:", list(bom_df.columns))
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
     
-    # 1. 초기 단가 설정 (구매가만)
-    unit_costs = latest_prices.copy()
+    # 1. 초기 단가 설정 (구매가만) - 키를 문자열로 통일
+    unit_costs = {str(k).strip(): v for k, v in latest_prices.items()}
     
-    # 2. 모든 생산품목 목록 (완제품 + 중간재)
+    # 2. 모든 생산품목 목록 (완제품 + 중간재) - 문자열 통일
     all_products = bom_df[['생산품목코드', '생산품목명']].dropna().drop_duplicates()
+    all_products['생산품목코드'] = all_products['생산품목코드'].astype(str).str.strip()
     all_products_set = set(all_products['생산품목코드'])
     
-    # 3. BOM에서 소모품목으로 사용되는 생산품목들 식별
-    bom_components = set(bom_df['소모품목코드'].dropna())
+    # 3. BOM에서 소모품목으로 사용되는 생산품목들 식별 - 문자열 통일
+    bom_components = set(bom_df['소모품목코드'].dropna().astype(str).str.strip())
     internal_components = bom_components.intersection(all_products_set)
     
     # 4. 소요량 숫자 타입으로 변환
@@ -156,7 +157,8 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
             break
             
         for product_code in remaining_products:
-            components = bom_df[bom_df['생산품목코드'] == product_code]
+            product_code = str(product_code).strip()  # 문자열 통일
+            components = bom_df[bom_df['생산품목코드'].astype(str).str.strip() == product_code]
             
             if components.empty:
                 continue
@@ -166,7 +168,7 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
             can_calculate = True
             
             for _, comp_row in components.iterrows():
-                comp_code = comp_row['소모품목코드']
+                comp_code = str(comp_row['소모품목코드']).strip()  # 문자열 통일
                 if comp_code not in unit_costs:
                     missing_components.append(comp_code)
                     can_calculate = False
@@ -177,16 +179,18 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
                 detail_log = []
                 
                 for _, comp_row in components.iterrows():
-                    comp_code = comp_row['소모품목코드']
+                    comp_code = str(comp_row['소모품목코드']).strip()  # 문자열 통일
                     comp_name = comp_row['소모품목명']
                     quantity = comp_row['소요량']
-                    unit_price = unit_costs[comp_code]
+                    unit_price = unit_costs.get(comp_code, 0)  # get 방식으로 안전하게 접근
                     component_cost = quantity * unit_price
                     total_cost += component_cost
                     
                     detail_log.append(f"  - {comp_name}({comp_code}): {quantity} × {unit_price:,.2f} = {component_cost:,.2f}")
                 
-                unit_costs[product_code] = total_cost
+                # 문자열로 키 저장 (데이터 타입 통일)
+                product_code_str = str(product_code).strip()
+                unit_costs[product_code_str] = total_cost
                 made_progress = True
                 
                 # 계산 로그 저장
@@ -203,21 +207,73 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
         if not made_progress:
             break
     
-    # 7. 결과 정리
+    # 7. 결과 정리 (디버깅 강화)
     summary_df = all_products.copy()
-    summary_df['계산된 단위 원가'] = summary_df['생산품목코드'].map(unit_costs)
     
-    # NaN을 0으로 처리하되, 실제로 계산되지 않은 것들을 구분
-    calculated_mask = summary_df['생산품목코드'].isin(unit_costs.keys())
+    # 디버깅: unit_costs 내용 확인
+    st.write(f"📊 **unit_costs 샘플 (처음 10개)**:")
+    sample_costs = dict(list(unit_costs.items())[:10])
+    for code, cost in sample_costs.items():
+        st.write(f"  {code}: {cost:,.2f}")
+    
+    # 생산품목코드 데이터 타입 통일
+    summary_df['생산품목코드'] = summary_df['생산품목코드'].astype(str).str.strip()
+    unit_costs_str = {str(k).strip(): v for k, v in unit_costs.items()}
+    
+    # 매핑 전 디버깅
+    st.write(f"📊 **매핑 테스트 - D626E 예시**:")
+    test_code = 'D626E'
+    if test_code in summary_df['생산품목코드'].values:
+        st.write(f"  - D626E가 summary_df에 있음: ✅")
+        if test_code in unit_costs_str:
+            st.write(f"  - D626E가 unit_costs에 있음: ✅ (값: {unit_costs_str[test_code]:,.2f})")
+        else:
+            st.write(f"  - D626E가 unit_costs에 없음: ❌")
+            st.write(f"  - unit_costs의 키들 중 D626E와 비슷한 것:", [k for k in unit_costs_str.keys() if 'D626E' in str(k)])
+    
+    # 단위 원가 매핑
+    summary_df['계산된 단위 원가'] = summary_df['생산품목코드'].map(unit_costs_str)
+    
+    # 계산 상태 결정 (매핑 후 값이 None이 아닌지 확인)
+    summary_df['계산 완료'] = summary_df['계산된 단위 원가'].notna()
     summary_df['계산된 단위 원가'] = summary_df['계산된 단위 원가'].fillna(0)
-    summary_df['계산 상태'] = calculated_mask.map({True: '계산완료', False: '계산불가'})
+    summary_df['계산 상태'] = summary_df['계산 완료'].map({True: '계산완료', False: '계산불가'})
     
-    # 상세 내역
+    # 디버깅: 매핑 결과 확인
+    if test_code in summary_df['생산품목코드'].values:
+        test_row = summary_df[summary_df['생산품목코드'] == test_code].iloc[0]
+        st.write(f"  - D626E 매핑 결과: {test_row['계산된 단위 원가']:,.2f} ({test_row['계산 상태']})")
+    
+    # 계산완료인데 0원인 항목들 찾기
+    problematic = summary_df[(summary_df['계산 상태'] == '계산완료') & (summary_df['계산된 단위 원가'] == 0)]
+    if not problematic.empty:
+        st.warning(f"⚠️ 계산완료로 표시되었지만 0원인 항목 {len(problematic)}개 발견!")
+        st.write("문제 항목들:", problematic['생산품목코드'].tolist()[:10])
+    
+    # 상세 내역 (데이터 타입 통일)
     details_df = bom_df.copy()
-    details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs).fillna(0)
+    details_df['소모품목코드'] = details_df['소모품목코드'].astype(str).str.strip()
+    details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs_str).fillna(0)
     details_df['부품별 원가'] = details_df['소요량'] * details_df['부품 단위 원가']
     
-    # 계산되지 않은 항목들
+    # D626E의 상세 내역 확인
+    if test_code in details_df['생산품목코드'].values:
+        d626e_details = details_df[details_df['생산품목코드'] == test_code]
+        st.write(f"📊 **D626E 상세 계산 확인**:")
+        st.write(f"  - 구성 부품 수: {len(d626e_details)}")
+        total_calculated = d626e_details['부품별 원가'].sum()
+        st.write(f"  - 상세내역 합계: {total_calculated:,.2f}")
+        
+        # 각 부품별 계산 내역
+        for _, row in d626e_details.iterrows():
+            comp_code = row['소모품목코드']
+            comp_name = row['소모품목명']
+            quantity = row['소요량']
+            unit_price = row['부품 단위 원가']
+            comp_total = row['부품별 원가']
+            st.write(f"    - {comp_name}({comp_code}): {quantity} × {unit_price:,.2f} = {comp_total:,.2f}")
+    
+    # 계산되지 않은 항목들 (실제로 계산불가인 항목만)
     uncalculated_df = summary_df[summary_df['계산 상태'] == '계산불가'].copy()
     
     # 계산되지 않은 이유 분석
