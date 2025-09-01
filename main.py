@@ -193,11 +193,19 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
                 unit_costs[product_code_str] = total_cost
                 made_progress = True
                 
+                # 실시간 디버깅: D626E 계산 확인
+                if product_code_str == 'D626E':
+                    st.write(f"🔍 **D626E 계산 완료!**")
+                    st.write(f"  - 계산된 총 원가: {total_cost:,.2f}")
+                    st.write(f"  - unit_costs에 저장됨: {unit_costs.get('D626E', 'NOT_FOUND')}")
+                    st.write(f"  - unit_costs 타입: {type(unit_costs)}")
+                    st.write(f"  - 저장된 키: {product_code_str} (타입: {type(product_code_str)})")
+                
                 # 계산 로그 저장
                 product_name = components.iloc[0]['생산품목명']
                 calculation_log.append({
                     'iteration': iteration + 1,
-                    'product_code': product_code,
+                    'product_code': product_code_str,  # 문자열로 통일
                     'product_name': product_name,
                     'total_cost': total_cost,
                     'details': detail_log
@@ -211,54 +219,72 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
     summary_df = all_products.copy()
     
     # 디버깅: unit_costs 내용 확인
-    st.write(f"📊 **unit_costs 샘플 (처음 10개)**:")
-    sample_costs = dict(list(unit_costs.items())[:10])
-    for code, cost in sample_costs.items():
-        st.write(f"  {code}: {cost:,.2f}")
+    st.write(f"📊 **unit_costs 상태 확인**:")
+    st.write(f"  - unit_costs 총 개수: {len(unit_costs)}")
+    st.write(f"  - D626E 포함 여부: {'D626E' in unit_costs}")
+    if 'D626E' in unit_costs:
+        st.write(f"  - D626E 값: {unit_costs['D626E']:,.2f}")
     
-    # 생산품목코드 데이터 타입 통일
+    # unit_costs의 키 샘플 확인
+    st.write(f"  - unit_costs 키 샘플: {list(unit_costs.keys())[:10]}")
+    
+    # 생산품목코드 데이터 타입 통일 BEFORE
+    st.write(f"📊 **summary_df 매핑 전 상태**:")
+    st.write(f"  - summary_df 행 수: {len(summary_df)}")
+    st.write(f"  - 생산품목코드 타입: {type(summary_df['생산품목코드'].iloc[0])}")
+    st.write(f"  - D626E 포함 여부: {'D626E' in summary_df['생산품목코드'].values}")
+    
+    # 데이터 타입 통일
     summary_df['생산품목코드'] = summary_df['생산품목코드'].astype(str).str.strip()
-    unit_costs_str = {str(k).strip(): v for k, v in unit_costs.items()}
+    unit_costs_for_mapping = {str(k).strip(): v for k, v in unit_costs.items()}
     
-    # 매핑 전 디버깅
-    st.write(f"📊 **매핑 테스트 - D626E 예시**:")
-    test_code = 'D626E'
-    if test_code in summary_df['생산품목코드'].values:
-        st.write(f"  - D626E가 summary_df에 있음: ✅")
-        if test_code in unit_costs_str:
-            st.write(f"  - D626E가 unit_costs에 있음: ✅ (값: {unit_costs_str[test_code]:,.2f})")
+    # 매핑 전 최종 확인
+    st.write(f"📊 **매핑 직전 최종 확인**:")
+    st.write(f"  - unit_costs_for_mapping에 D626E: {'D626E' in unit_costs_for_mapping}")
+    st.write(f"  - summary_df에 D626E: {'D626E' in summary_df['생산품목코드'].values}")
+    
+    if 'D626E' in unit_costs_for_mapping and 'D626E' in summary_df['생산품목코드'].values:
+        st.write(f"  - 매핑 가능: ✅ (값: {unit_costs_for_mapping['D626E']:,.2f})")
+    else:
+        st.write(f"  - 매핑 불가능: ❌")
+        # 키 비교
+        unit_keys_sample = list(unit_costs_for_mapping.keys())[:20]
+        summary_codes_sample = summary_df['생산품목코드'].head(20).tolist()
+        st.write(f"  - unit_costs 키들: {unit_keys_sample}")
+        st.write(f"  - summary_df 코드들: {summary_codes_sample}")
+    
+    # 매핑 실행
+    st.write("🔄 **매핑 실행 중...**")
+    summary_df['계산된 단위 원가'] = summary_df['생산품목코드'].map(unit_costs_for_mapping)
+    
+    # 매핑 결과 즉시 확인
+    if 'D626E' in summary_df['생산품목코드'].values:
+        d626e_row = summary_df[summary_df['생산품목코드'] == 'D626E'].iloc[0]
+        mapped_value = d626e_row['계산된 단위 원가']
+        st.write(f"📊 **D626E 매핑 결과**: {mapped_value} (타입: {type(mapped_value)})")
+        
+        if pd.isna(mapped_value):
+            st.error("❌ D626E 매핑 실패! NaN 반환됨")
+        elif mapped_value == 0:
+            st.error("❌ D626E 매핑 결과가 0!")
         else:
-            st.write(f"  - D626E가 unit_costs에 없음: ❌")
-            st.write(f"  - unit_costs의 키들 중 D626E와 비슷한 것:", [k for k in unit_costs_str.keys() if 'D626E' in str(k)])
-    
-    # 단위 원가 매핑
-    summary_df['계산된 단위 원가'] = summary_df['생산품목코드'].map(unit_costs_str)
+            st.success(f"✅ D626E 매핑 성공: {mapped_value:,.2f}")
     
     # 계산 상태 결정 (매핑 후 값이 None이 아닌지 확인)
     summary_df['계산 완료'] = summary_df['계산된 단위 원가'].notna()
     summary_df['계산된 단위 원가'] = summary_df['계산된 단위 원가'].fillna(0)
     summary_df['계산 상태'] = summary_df['계산 완료'].map({True: '계산완료', False: '계산불가'})
     
-    # 디버깅: 매핑 결과 확인
-    if test_code in summary_df['생산품목코드'].values:
-        test_row = summary_df[summary_df['생산품목코드'] == test_code].iloc[0]
-        st.write(f"  - D626E 매핑 결과: {test_row['계산된 단위 원가']:,.2f} ({test_row['계산 상태']})")
-    
-    # 계산완료인데 0원인 항목들 찾기
-    problematic = summary_df[(summary_df['계산 상태'] == '계산완료') & (summary_df['계산된 단위 원가'] == 0)]
-    if not problematic.empty:
-        st.warning(f"⚠️ 계산완료로 표시되었지만 0원인 항목 {len(problematic)}개 발견!")
-        st.write("문제 항목들:", problematic['생산품목코드'].tolist()[:10])
-    
     # 상세 내역 (데이터 타입 통일)
     details_df = bom_df.copy()
     details_df['소모품목코드'] = details_df['소모품목코드'].astype(str).str.strip()
-    details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs_str).fillna(0)
+    details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs_for_mapping).fillna(0)
     details_df['부품별 원가'] = details_df['소요량'] * details_df['부품 단위 원가']
     
     # D626E의 상세 내역 확인
-    if test_code in details_df['생산품목코드'].values:
-        d626e_details = details_df[details_df['생산품목코드'] == test_code]
+    test_code = 'D626E'
+    if test_code in details_df['생산품목코드'].astype(str).str.strip().values:
+        d626e_details = details_df[details_df['생산품목코드'].astype(str).str.strip() == test_code]
         st.write(f"📊 **D626E 상세 계산 확인**:")
         st.write(f"  - 구성 부품 수: {len(d626e_details)}")
         total_calculated = d626e_details['부품별 원가'].sum()
@@ -272,6 +298,17 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
             unit_price = row['부품 단위 원가']
             comp_total = row['부품별 원가']
             st.write(f"    - {comp_name}({comp_code}): {quantity} × {unit_price:,.2f} = {comp_total:,.2f}")
+        
+        # 상세내역 합계와 summary_df 값 비교
+        if test_code in summary_df['생산품목코드'].values:
+            summary_value = summary_df[summary_df['생산품목코드'] == test_code]['계산된 단위 원가'].iloc[0]
+            st.write(f"📊 **값 비교**:")
+            st.write(f"  - 상세내역 합계: {total_calculated:,.2f}")
+            st.write(f"  - summary_df 값: {summary_value:,.2f}")
+            if abs(total_calculated - summary_value) > 0.01:
+                st.error(f"❌ 값이 일치하지 않음! 차이: {abs(total_calculated - summary_value):,.2f}")
+            else:
+                st.success("✅ 값이 일치함!")
     
     # 계산되지 않은 항목들 (실제로 계산불가인 항목만)
     uncalculated_df = summary_df[summary_df['계산 상태'] == '계산불가'].copy()
