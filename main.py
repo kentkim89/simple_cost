@@ -43,45 +43,33 @@ def get_latest_prices(purchase_df):
 
 def calculate_multi_level_bom_costs(bom_df, latest_prices):
     """
-    가장 안정적인 방식으로 다단계 BOM 원가를 계산하고, 실패 원인을 분석합니다.
+    검증된 최종 안정화 로직으로 다단계 BOM 원가를 계산합니다.
     """
-    # 1. 초기 단가 설정 (구매가)
     unit_costs = latest_prices.copy()
 
-    # 2. 계산 대상인 생산품 목록
     products_to_calc = bom_df[['생산품목코드', '생산품목명']].dropna().drop_duplicates()
     products_to_calc_set = set(products_to_calc['생산품목코드'])
 
-    # 3. 소요량 숫자 타입으로 변환
     bom_df['소요량'] = pd.to_numeric(bom_df['소요량'], errors='coerce').fillna(0)
 
-    # 4. 안정적인 반복 계산 로직
-    for _ in range(len(products_to_calc_set) + 5): # 무한루프 방지를 위한 최대 반복 횟수
+    for _ in range(len(products_to_calc_set) + 5):
         made_progress = False
-        # 아직 원가가 계산되지 않은 생산품만 대상으로 순회
         remaining_products = [p for p in products_to_calc_set if p not in unit_costs]
         
         for product_code in remaining_products:
             components = bom_df[bom_df['생산품목코드'] == product_code]
             
-            # 모든 부품의 원가를 알고 있는지 확인
-            can_calculate = all(comp_code in unit_costs for comp_code in components['소모품목코드'])
-
-            if can_calculate:
-                # 모든 부품 원가를 알면, 현재 제품 원가 계산
+            if all(comp_code in unit_costs for comp_code in components['소모품목코드']):
                 total_cost = (components['소요량'] * components['소모품목코드'].map(unit_costs).fillna(0)).sum()
                 unit_costs[product_code] = total_cost
-                made_progress = True # 이번 회차에 계산 성공했음을 표시
+                made_progress = True
         
-        # 한 회차에서 어떤 제품도 새로 계산하지 못했다면 더 이상 진행 불가
         if not made_progress:
             break
             
-    # 5. 결과 정리
     summary_df = products_to_calc.copy()
     summary_df['계산된 단위 원가'] = summary_df['생산품목코드'].map(unit_costs).fillna(0)
     
-    # 상세 내역 및 원인 분석
     details_df = bom_df.copy()
     details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs).fillna(0)
     details_df['부품별 원가'] = details_df['소요량'] * details_df['부품 단위 원가']
