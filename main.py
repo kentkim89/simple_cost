@@ -43,57 +43,51 @@ def get_latest_prices(purchase_df):
 
 def calculate_multi_level_bom_costs(bom_df, latest_prices):
     """
-    안정성이 개선된 방식으로 다단계 BOM 원가를 계산하고, 실패 원인을 분석합니다.
+    가장 안정적인 방식으로 다단계 BOM 원가를 계산하고, 실패 원인을 분석합니다.
     """
+    # 1. 초기 단가 설정 (구매가)
     unit_costs = latest_prices.copy()
 
-    all_products_info = pd.concat([
-        bom_df[['생산품목코드', '생산품목명']].rename(columns={'생산품목코드': '품목코드', '생산품목명': '품목명'}),
-        bom_df[['소모품목코드', '소모품목명']].rename(columns={'소모품목코드': '품목코드', '소모품목명': '품목명'})
-    ]).dropna(subset=['품목코드']).drop_duplicates('품목코드').set_index('품목코드')
+    # 2. 계산 대상인 생산품 목록
+    products_to_calc = bom_df[['생산품목코드', '생산품목명']].dropna().drop_duplicates()
+    products_to_calc_set = set(products_to_calc['생산품목코드'])
 
-    # 소요량 컬럼을 숫자로 변환
+    # 3. 소요량 숫자 타입으로 변환
     bom_df['소요량'] = pd.to_numeric(bom_df['소요량'], errors='coerce').fillna(0)
 
-    while True:
-        bom_df['부품단가계산가능'] = bom_df['소모품목코드'].isin(unit_costs.keys())
-        calculable_groups = bom_df.groupby('생산품목코드')['부품단가계산가능'].all()
-        products_to_calculate = calculable_groups[calculable_groups & ~calculable_groups.index.isin(unit_costs.keys())].index
+    # 4. 안정적인 반복 계산 로직
+    for _ in range(len(products_to_calc_set) + 5): # 무한루프 방지를 위한 최대 반복 횟수
+        made_progress = False
+        # 아직 원가가 계산되지 않은 생산품만 대상으로 순회
+        remaining_products = [p for p in products_to_calc_set if p not in unit_costs]
         
-        if len(products_to_calculate) == 0:
-            break
-
-        for product_code in products_to_calculate:
+        for product_code in remaining_products:
             components = bom_df[bom_df['생산품목코드'] == product_code]
-            total_cost = (components['소요량'] * components['소모품목코드'].map(unit_costs).fillna(0)).sum()
-            unit_costs[product_code] = total_cost
+            
+            # 모든 부품의 원가를 알고 있는지 확인
+            can_calculate = all(comp_code in unit_costs for comp_code in components['소모품목코드'])
 
-    summary_df = all_products_info.copy()
-    summary_df['계산된 단위 원가'] = summary_df.index.map(unit_costs).fillna(0)
-    summary_df.reset_index(inplace=True)
-
+            if can_calculate:
+                # 모든 부품 원가를 알면, 현재 제품 원가 계산
+                total_cost = (components['소요량'] * components['소모품목코드'].map(unit_costs).fillna(0)).sum()
+                unit_costs[product_code] = total_cost
+                made_progress = True # 이번 회차에 계산 성공했음을 표시
+        
+        # 한 회차에서 어떤 제품도 새로 계산하지 못했다면 더 이상 진행 불가
+        if not made_progress:
+            break
+            
+    # 5. 결과 정리
+    summary_df = products_to_calc.copy()
+    summary_df['계산된 단위 원가'] = summary_df['생산품목코드'].map(unit_costs).fillna(0)
+    
+    # 상세 내역 및 원인 분석
     details_df = bom_df.copy()
     details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs).fillna(0)
     details_df['부품별 원가'] = details_df['소요량'] * details_df['부품 단위 원가']
     
-    uncalculated_products = []
-    zero_cost_products = summary_df[(summary_df['계산된 단위 원가'] == 0) & (summary_df['품목코드'].isin(bom_df['생산품목코드']))]
-
-    for _, product in zero_cost_products.iterrows():
-        missing_components = []
-        components = bom_df[bom_df['생산품목코드'] == product['품목코드']]
-        for _, comp in components.iterrows():
-            if comp['소모품목코드'] not in unit_costs or unit_costs.get(comp['소모품목코드']) == 0:
-                missing_components.append(f"{comp['소모품목명']} ({comp['소모품목코드']})")
-        
-        if missing_components:
-            uncalculated_products.append({
-                "품목코드": product['품목코드'],
-                "품목명": product['품목명'],
-                "원가 정보가 없는 부품": ", ".join(list(set(missing_components)))
-            })
-            
-    uncalculated_df = pd.DataFrame(uncalculated_products)
+    uncalculated_df = summary_df[(summary_df['계산된 단위 원가'] == 0) & (summary_df['생산품목코드'].isin(bom_df['생산품목코드']))]
+    
     return summary_df, details_df, uncalculated_df
 
 def main():
@@ -116,15 +110,15 @@ def main():
                 with st.spinner('최종 로직으로 전체 원가를 계산 중입니다...'):
                     latest_prices = get_latest_prices(purchase_df)
                     summary_df, details_df, uncalculated_df = calculate_multi_level_bom_costs(bom_df, latest_prices)
-                    finished_goods_summary = summary_df[summary_df['품목명'].str.contains('[완제품]', regex=False, na=False)]
+                    finished_goods_summary = summary_df[summary_df['생산품목명'].str.contains('[완제품]', regex=False, na=False)]
 
                     st.header('3. [완제품] 원가 계산 결과 요약')
-                    st.dataframe(finished_goods_summary[['품목코드', '품목명', '계산된 단위 원가']].style.format({'계산된 단위 원가': '{:,.2f}'}))
+                    st.dataframe(finished_goods_summary[['생산품목코드', '생산품목명', '계산된 단위 원가']].rename(columns={'생산품목코드':'품목코드', '생산품목명':'품목명'}).style.format({'계산된 단위 원가': '{:,.2f}'}))
 
                     if not uncalculated_df.empty:
                         with st.expander("⚠️ 원가 0원 항목 분석 (클릭하여 확인)"):
                             st.write("아래 품목들은 구성 부품의 원가 정보가 없어 원가가 0으로 계산되었습니다.")
-                            st.dataframe(uncalculated_df)
+                            st.dataframe(uncalculated_df[['생산품목코드', '생산품목명']].rename(columns={'생산품목코드':'품목코드', '생산품목명':'품목명'}))
 
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
