@@ -257,11 +257,16 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
     st.write("🔄 **매핑 실행 중...**")
     summary_df['계산된 단위 원가'] = summary_df['생산품목코드'].map(unit_costs_for_mapping)
     
-    # 매핑 결과 즉시 확인
+    # 계산 상태 먼저 결정 (fillna 실행 전에!)
+    summary_df['계산 완료'] = summary_df['계산된 단위 원가'].notna()
+    summary_df['계산 상태'] = summary_df['계산 완료'].map({True: '계산완료', False: '계산불가'})
+    
+    # 매핑 결과 즉시 확인 (fillna 실행 전)
     if 'D626E' in summary_df['생산품목코드'].values:
         d626e_row = summary_df[summary_df['생산품목코드'] == 'D626E'].iloc[0]
         mapped_value = d626e_row['계산된 단위 원가']
-        st.write(f"📊 **D626E 매핑 결과**: {mapped_value} (타입: {type(mapped_value)})")
+        calculation_status = d626e_row['계산 상태']
+        st.write(f"📊 **D626E 매핑 결과 (fillna 실행 전)**: {mapped_value} (타입: {type(mapped_value)}, 상태: {calculation_status})")
         
         if pd.isna(mapped_value):
             st.error("❌ D626E 매핑 실패! NaN 반환됨")
@@ -270,10 +275,20 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
         else:
             st.success(f"✅ D626E 매핑 성공: {mapped_value:,.2f}")
     
-    # 계산 상태 결정 (매핑 후 값이 None이 아닌지 확인)
-    summary_df['계산 완료'] = summary_df['계산된 단위 원가'].notna()
-    summary_df['계산된 단위 원가'] = summary_df['계산된 단위 원가'].fillna(0)
-    summary_df['계산 상태'] = summary_df['계산 완료'].map({True: '계산완료', False: '계산불가'})
+    # 마지막에 NaN을 0으로 변환 (계산 실패한 것들만)
+    summary_df.loc[summary_df['계산 상태'] == '계산불가', '계산된 단위 원가'] = 0
+    
+    # 최종 결과 다시 확인
+    if 'D626E' in summary_df['생산품목코드'].values:
+        d626e_row = summary_df[summary_df['생산품목코드'] == 'D626E'].iloc[0]
+        final_value = d626e_row['계산된 단위 원가']
+        final_status = d626e_row['계산 상태']
+        st.write(f"📊 **D626E 최종 결과**: {final_value:,.2f} (상태: {final_status})")
+        
+        if final_status == '계산완료' and final_value == 0:
+            st.error("🚨 심각한 오류: 계산완료인데 값이 0입니다!")
+        else:
+            st.success(f"✅ D626E 최종 확인 완료: {final_value:,.2f}")
     
     # 상세 내역 (데이터 타입 통일)
     details_df = bom_df.copy()
