@@ -29,23 +29,97 @@ def load_data(uploaded_file, skiprows=0):
 def get_latest_prices(purchase_df):
     """
     구매 데이터에서 품목별 최신 단가를 추출합니다.
+    컬럼명을 동적으로 감지하여 처리합니다.
     """
     purchase_df_copy = purchase_df.copy()
-    purchase_df_copy['일자-No.'] = purchase_df_copy['일자-No.'].astype(str)
-    purchase_df_copy['date'] = purchase_df_copy['일자-No.'].apply(lambda x: x.split('-')[0])
-    purchase_df_copy['date'] = pd.to_datetime(purchase_df_copy['date'], errors='coerce')
-    purchase_df_copy.dropna(subset=['date'], inplace=True)
-    # 단가 컬럼을 숫자로 변환
-    purchase_df_copy['단가'] = pd.to_numeric(purchase_df_copy['단가'], errors='coerce').fillna(0)
-    purchase_df_copy = purchase_df_copy.sort_values(by='date', ascending=False)
-    latest_prices = purchase_df_copy.drop_duplicates(subset='품목코드', keep='first')
-    return latest_prices.set_index('품목코드')['단가'].to_dict()
+    
+    # 컬럼명 동적 감지
+    date_col = None
+    item_code_col = None
+    price_col = None
+    
+    # 가능한 컬럼명들 확인
+    for col in purchase_df_copy.columns:
+        col_lower = str(col).lower()
+        if '일자' in col_lower and 'no' in col_lower:
+            date_col = col
+        elif '품목코드' in col_lower:
+            item_code_col = col
+        elif '단가' in col_lower:
+            price_col = col
+    
+    # 컬럼을 찾지 못한 경우 첫 번째 행이 실제 헤더인지 확인
+    if not all([date_col, item_code_col, price_col]):
+        st.warning("컬럼명을 자동으로 찾지 못했습니다. 첫 번째 데이터 행을 헤더로 사용합니다.")
+        if len(purchase_df_copy) > 0:
+            # 첫 번째 행을 헤더로 설정
+            new_headers = purchase_df_copy.iloc[0].tolist()
+            purchase_df_copy.columns = new_headers
+            purchase_df_copy = purchase_df_copy.iloc[1:].reset_index(drop=True)
+            
+            # 다시 컬럼 찾기
+            for col in purchase_df_copy.columns:
+                col_str = str(col)
+                if '일자-No.' in col_str:
+                    date_col = col
+                elif '품목코드' in col_str:
+                    item_code_col = col  
+                elif '단가' in col_str:
+                    price_col = col
+    
+    # 필수 컬럼이 없으면 기본값 사용
+    if not date_col and len(purchase_df_copy.columns) > 0:
+        date_col = purchase_df_copy.columns[0]
+    if not item_code_col and len(purchase_df_copy.columns) > 1:  
+        item_code_col = purchase_df_copy.columns[1]
+    if not price_col and len(purchase_df_copy.columns) > 5:
+        price_col = purchase_df_copy.columns[5]
+    
+    st.info(f"사용된 컬럼: 일자={date_col}, 품목코드={item_code_col}, 단가={price_col}")
+    
+    try:
+        # 일자 처리
+        if date_col:
+            purchase_df_copy[date_col] = purchase_df_copy[date_col].astype(str)
+            purchase_df_copy['date'] = purchase_df_copy[date_col].apply(lambda x: str(x).split('-')[0] if '-' in str(x) else str(x))
+            purchase_df_copy['date'] = pd.to_datetime(purchase_df_copy['date'], errors='coerce')
+            purchase_df_copy.dropna(subset=['date'], inplace=True)
+        
+        # 단가 처리
+        if price_col:
+            purchase_df_copy[price_col] = pd.to_numeric(purchase_df_copy[price_col], errors='coerce').fillna(0)
+        
+        # 품목코드 처리
+        if item_code_col:
+            purchase_df_copy = purchase_df_copy.dropna(subset=[item_code_col])
+        
+        # 최신 단가 추출
+        if date_col:
+            purchase_df_copy = purchase_df_copy.sort_values(by='date', ascending=False)
+        
+        latest_prices = purchase_df_copy.drop_duplicates(subset=item_code_col, keep='first')
+        return latest_prices.set_index(item_code_col)[price_col].to_dict()
+        
+    except Exception as e:
+        st.error(f"단가 추출 중 오류 발생: {e}")
+        st.write("구매 데이터 컬럼명:", list(purchase_df_copy.columns))
+        st.write("데이터 샘플:", purchase_df_copy.head())
+        return {}
 
 def calculate_multi_level_bom_costs(bom_df, latest_prices):
     """
     다단계 BOM 원가를 올바르게 계산합니다.
     중간재(다른 생산품목)도 소모품목으로 사용되는 경우를 처리합니다.
     """
+    # 0. 필수 컬럼 확인
+    required_cols = ['생산품목코드', '생산품목명', '소모품목코드', '소모품목명', '소요량']
+    missing_cols = [col for col in required_cols if col not in bom_df.columns]
+    
+    if missing_cols:
+        st.error(f"BOM 데이터에 필수 컬럼이 없습니다: {missing_cols}")
+        st.write("사용 가능한 컬럼:", list(bom_df.columns))
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
+    
     # 1. 초기 단가 설정 (구매가만)
     unit_costs = latest_prices.copy()
     
@@ -65,6 +139,10 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
     st.write(f"- 전체 생산품목 수: {len(all_products_set)}")
     st.write(f"- 구매 데이터에서 찾은 품목 수: {len(latest_prices)}")
     st.write(f"- BOM 내부에서 중간재로 사용되는 품목 수: {len(internal_components)}")
+    
+    if len(latest_prices) == 0:
+        st.warning("구매 데이터에서 단가 정보를 찾을 수 없습니다. 구매 데이터 형식을 확인해주세요.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
     
     # 6. 반복 계산으로 다단계 BOM 원가 계산
     max_iterations = len(all_products_set) + 10
@@ -173,9 +251,29 @@ def main():
         purchase_df = load_data(purchase_file)
 
         if bom_df_raw is not None and purchase_df is not None:
-            # test 품목 제외
-            bom_df = bom_df_raw[bom_df_raw['소모품목코드'] != '99701'].copy()
-            st.info("'test'(99701) 품목을 BOM 분석에서 제외했습니다.")
+            # 데이터 미리보기
+            st.subheader("📋 데이터 미리보기")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**BOM 데이터**")
+                st.write(f"행 수: {len(bom_df_raw)}")
+                st.write("컬럼명:", list(bom_df_raw.columns))
+                st.dataframe(bom_df_raw.head())
+            
+            with col2:
+                st.write("**구매 데이터**") 
+                st.write(f"행 수: {len(purchase_df)}")
+                st.write("컬럼명:", list(purchase_df.columns))
+                st.dataframe(purchase_df.head())
+            
+            # test 품목 제외 (컬럼이 존재하는 경우에만)
+            if '소모품목코드' in bom_df_raw.columns:
+                bom_df = bom_df_raw[bom_df_raw['소모품목코드'] != '99701'].copy()
+                st.info("'test'(99701) 품목을 BOM 분석에서 제외했습니다.")
+            else:
+                bom_df = bom_df_raw.copy()
+                st.warning("'소모품목코드' 컬럼을 찾을 수 없어 test 품목 제외를 건너뜁니다.")
 
             st.header('2. 원가 계산 실행')
             if st.button('모든 완제품 원가 계산하기'):
