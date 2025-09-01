@@ -34,19 +34,15 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
     """
     최적화된 방식으로 다단계 BOM 원가를 계산하고, 실패 원인을 분석합니다.
     """
-    # 1. 초기 단가 설정: 구매 기록이 있는 원재료/부자재 단가
     unit_costs = latest_prices.set_index('품목코드')['단가'].to_dict()
     
-    # 2. 모든 품목 정보 통합 (생산품목 + 소모품목)
     all_products_info = pd.concat([
         bom_df[['생산품목코드', '생산품목명']].rename(columns={'생산품목코드': '품목코드', '생산품목명': '품목명'}),
         bom_df[['소모품목코드', '소모품목명']].rename(columns={'소모품목코드': '품목코드', '소모품목명': '품목명'})
     ]).dropna(subset=['품목코드']).drop_duplicates('품목코드').set_index('품목코드')
 
-    # 3. 계산 루프: 더 이상 계산할 품목이 없을 때까지 반복
     while True:
         newly_calculated_count = 0
-        # 아직 원가가 계산되지 않은 생산품목 목록
         products_to_calculate = bom_df[~bom_df['생산품목코드'].isin(unit_costs.keys())]['생산품목코드'].unique()
 
         for product_code in products_to_calculate:
@@ -54,35 +50,29 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
             can_calculate = True
             total_cost = 0
             
-            # 모든 부품(소모품목)의 원가가 이미 계산되었는지 확인
             for _, component in components.iterrows():
                 comp_code = component['소모품목코드']
                 if comp_code not in unit_costs:
                     can_calculate = False
-                    break # 부품 원가를 모르므로 상위 품목 계산 불가
+                    break
                 total_cost += component['소요량'] * unit_costs.get(comp_code, 0)
             
-            # 모든 부품 원가를 알 경우, 현재 품목의 원가를 계산하고 추가
             if can_calculate:
                 unit_costs[product_code] = total_cost
                 newly_calculated_count += 1
         
-        # 한 반복 동안 아무것도 계산되지 않았다면, 모든 계산이 완료된 것
         if newly_calculated_count == 0:
             break
 
-    # 4. 결과 정리
     summary_df = all_products_info.copy()
     summary_df['계산된 단위 원가'] = summary_df.index.map(unit_costs).fillna(0)
     summary_df.reset_index(inplace=True)
 
-    # 5. 상세 내역 및 원인 분석
     details_df = bom_df.copy()
     details_df['부품 단위 원가'] = details_df['소모품목코드'].map(unit_costs).fillna(0)
     details_df['부품별 원가'] = details_df['소요량'] * details_df['부품 단위 원가']
     
     uncalculated_products = []
-    # 원가가 0인 '생산품목'들을 대상으로 분석
     zero_cost_products = summary_df[(summary_df['계산된 단위 원가'] == 0) & (summary_df['품목코드'].isin(bom_df['생산품목코드']))]
 
     for _, product in zero_cost_products.iterrows():
@@ -104,17 +94,23 @@ def calculate_multi_level_bom_costs(bom_df, latest_prices):
     return summary_df, details_df, uncalculated_df
 
 def main():
-    st.title('BOM 원가 계산기 (성능 최적화) 🚀')
+    st.title('BOM 원가 계산기 (최종 버전) 🚀')
 
     st.header('1. 파일 업로드')
     bom_file = st.file_uploader("BOM 데이터 (CSV 또는 Excel)", type=['csv', 'xlsx'])
     purchase_file = st.file_uploader("구매 기록 데이터 (CSV 또는 Excel)", type=['csv', 'xlsx'])
 
     if bom_file and purchase_file:
-        bom_df = load_data(bom_file, skiprows=1)
+        bom_df_raw = load_data(bom_file, skiprows=1)
         purchase_df = load_data(purchase_file)
 
-        if bom_df is not None and purchase_df is not None:
+        if bom_df_raw is not None and purchase_df is not None:
+            
+            # --- 'test' 품목(99701)을 BOM 데이터에서 원천 제외 ---
+            bom_df = bom_df_raw[bom_df_raw['소모품목코드'] != '99701'].copy()
+            st.info("'test'(99701) 품목을 BOM 분석에서 제외했습니다.")
+            # ---------------------------------------------------
+
             st.header('2. 원가 계산 실행')
             if st.button('모든 완제품 원가 계산하기'):
                 with st.spinner('최적화된 방식으로 전체 원가를 계산 중입니다...'):
