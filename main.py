@@ -266,13 +266,28 @@ def main():
     st.title("BOM 원가 계산기 (SharePoint 연동)")
     
     # BOM 데이터 로드
-    st.header("1. BOM 데이터 (SharePoint)")
+    st.header("1. BOM 데이터")
     
-    if st.button("SharePoint에서 BOM 데이터 로드"):
-        bom_df = load_sharepoint_file()
-        if bom_df is not None:
-            st.session_state.bom_data = bom_df
-            st.success(f"BOM 데이터 로드 성공: {len(bom_df)}행")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("SharePoint 연동")
+        if st.button("SharePoint에서 BOM 데이터 로드"):
+            bom_df = load_sharepoint_file()
+            if bom_df is not None:
+                st.session_state.bom_data = bom_df
+                st.success(f"BOM 데이터 로드 성공: {len(bom_df)}행")
+    
+    with col2:
+        st.subheader("임시 해결: 파일 업로드")
+        bom_file = st.file_uploader("BOM 파일을 직접 업로드", type=['xlsx', 'xls'], key="bom_upload")
+        if bom_file:
+            try:
+                bom_df = pd.read_excel(bom_file, skiprows=1, dtype=str, engine='openpyxl')
+                st.session_state.bom_data = bom_df
+                st.success(f"BOM 파일 업로드 성공: {len(bom_df)}행")
+            except Exception as e:
+                st.error(f"BOM 파일 읽기 실패: {e}")
     
     # 구매 데이터 업로드
     st.header("2. 구매 데이터")
@@ -287,29 +302,60 @@ def main():
             bom_df = st.session_state.bom_data
             
             st.header("3. 원가 계산")
-            if st.button("계산 시작"):
-                # 구매 단가 추출
-                purchase_prices = extract_purchase_prices(purchase_df)
-                st.success(f"구매 단가 추출: {len(purchase_prices)}개")
-                
-                # BOM 원가 계산
-                result_df = calculate_all_bom_costs(bom_df, purchase_prices)
-                
-                # 완제품 필터링
-                finished_goods = result_df[
-                    result_df['생산품목명'].str.contains('[완제품]', regex=False, na=False)
-                ]
-                
-                st.header("4. 결과")
-                st.dataframe(finished_goods)
-                
-                # 다운로드
-                csv_data = finished_goods.to_csv(index=False, encoding='utf-8-sig')
-                st.download_button(
-                    "결과 다운로드",
-                    csv_data,
-                    f"BOM원가_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-                )
+            if st.button("계산 시작", type="primary"):
+                # BOM 데이터 검증
+                if validate_bom_data(bom_df)[0]:
+                    # 구매 단가 추출
+                    with st.spinner("구매 단가 추출 중..."):
+                        purchase_prices = extract_purchase_prices(purchase_df)
+                    
+                    if purchase_prices:
+                        st.success(f"구매 단가 추출: {len(purchase_prices)}개")
+                        
+                        # BOM 원가 계산
+                        with st.spinner("BOM 원가 계산 중..."):
+                            result_df = calculate_all_bom_costs(bom_df, purchase_prices)
+                        
+                        if not result_df.empty:
+                            # 완제품 필터링
+                            finished_goods = result_df[
+                                result_df['생산품목명'].str.contains('[완제품]', regex=False, na=False)
+                            ]
+                            
+                            st.header("4. 계산 결과")
+                            
+                            # 통계
+                            total = len(finished_goods)
+                            calculated = len(finished_goods[finished_goods['계산상태'] == '계산완료'])
+                            success_rate = (calculated / total * 100) if total > 0 else 0
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("전체 완제품", f"{total:,}개")
+                            with col2:
+                                st.metric("계산 성공", f"{calculated:,}개")
+                            with col3:
+                                st.metric("성공률", f"{success_rate:.1f}%")
+                            
+                            # 결과 테이블
+                            st.dataframe(finished_goods)
+                            
+                            # 다운로드
+                            csv_data = finished_goods.to_csv(index=False, encoding='utf-8-sig')
+                            st.download_button(
+                                "결과 다운로드 (CSV)",
+                                csv_data,
+                                f"BOM원가_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                                mime="text/csv"
+                            )
+                        else:
+                            st.error("BOM 원가 계산에 실패했습니다.")
+                    else:
+                        st.error("구매 단가를 추출할 수 없습니다. 구매 데이터 형식을 확인하세요.")
+                else:
+                    st.error("BOM 데이터가 올바르지 않습니다. 필수 컬럼을 확인하세요.")
+        else:
+            st.info("먼저 BOM 데이터를 로드해주세요.")
 
 if __name__ == "__main__":
     main()
