@@ -104,13 +104,12 @@ class SharePointClient:
             return None
     
     def download_file_from_sharepoint(self, file_url: str) -> Optional[bytes]:
-        """SharePoint 파일 다운로드"""
+        """SharePoint 파일 다운로드 (개선된 버전)"""
         try:
             token = self.get_access_token()
             if not token:
                 return None
             
-            # SharePoint 파일 URL에서 파일 ID 추출
             site_name = st.secrets["sharepoint_files"]["site_name"]
             file_name = st.secrets["sharepoint_files"]["file_name"]
             
@@ -123,7 +122,9 @@ class SharePointClient:
                 'Accept': 'application/json'
             }
             
-            # 드라이브 정보 가져오기
+            st.info(f"🔍 파일 검색 중: {file_name}")
+            
+            # 방법 1: 드라이브별 파일 검색
             drives_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
             drives_response = requests.get(drives_url, headers=headers)
             drives_response.raise_for_status()
@@ -133,33 +134,99 @@ class SharePointClient:
                 st.error("❌ SharePoint 드라이브를 찾을 수 없습니다")
                 return None
             
-            drive_id = drives[0]['id']  # 첫 번째 드라이브 사용
+            file_item = None
+            drive_id = None
             
-            # 파일 검색
-            search_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{file_name}')"
-            search_response = requests.get(search_url, headers=headers)
-            search_response.raise_for_status()
+            # 모든 드라이브에서 파일 검색
+            for drive in drives:
+                try:
+                    drive_id = drive['id']
+                    st.info(f"🔍 드라이브 '{drive['name']}'에서 검색 중...")
+                    
+                    # 방법 1-1: 검색 API 사용
+                    search_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{file_name}')"
+                    search_response = requests.get(search_url, headers=headers)
+                    
+                    if search_response.status_code == 200:
+                        search_results = search_response.json().get('value', [])
+                        if search_results:
+                            file_item = search_results[0]
+                            st.info(f"✅ 파일 발견: {file_item['name']}")
+                            break
+                    
+                    # 방법 1-2: 루트 디렉터리 직접 조회
+                    if not file_item:
+                        root_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/children"
+                        root_response = requests.get(root_url, headers=headers)
+                        
+                        if root_response.status_code == 200:
+                            root_files = root_response.json().get('value', [])
+                            for f in root_files:
+                                if f['name'].lower() == file_name.lower():
+                                    file_item = f
+                                    st.info(f"✅ 루트에서 파일 발견: {file_item['name']}")
+                                    break
+                    
+                    if file_item:
+                        break
+                        
+                except Exception as drive_error:
+                    st.warning(f"⚠️ 드라이브 '{drive['name']}' 검색 실패: {drive_error}")
+                    continue
             
-            search_results = search_response.json()['value']
-            if not search_results:
+            if not file_item:
                 st.error(f"❌ 파일 '{file_name}'을 찾을 수 없습니다")
                 return None
             
-            # 첫 번째 검색 결과 사용
-            file_item = search_results[0]
-            download_url = file_item['@microsoft.graph.downloadUrl']
+            st.info(f"📁 파일 정보: {file_item['name']} (크기: {file_item.get('size', 0):,} bytes)")
             
-            st.info(f"📁 파일 발견: {file_item['name']} (크기: {file_item['size']:,} bytes)")
+            # 방법 2: 다운로드 URL 생성 (여러 방법 시도)
+            download_url = None
             
-            # 파일 다운로드
-            file_response = requests.get(download_url)
+            # 방법 2-1: @microsoft.graph.downloadUrl 사용
+            if '@microsoft.graph.downloadUrl' in file_item:
+                download_url = file_item['@microsoft.graph.downloadUrl']
+                st.info("🔗 downloadUrl 방식 사용")
+            
+            # 방법 2-2: /content 엔드포인트 사용
+            elif 'id' in file_item:
+                download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{file_item['id']}/content"
+                st.info("🔗 content 엔드포인트 방식 사용")
+            
+            # 방법 2-3: 직접 경로로 접근
+            else:
+                download_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{file_name}:/content"
+                st.info("🔗 직접 경로 방식 사용")
+            
+            if not download_url:
+                st.error("❌ 다운로드 URL을 생성할 수 없습니다")
+                return None
+            
+            # 파일 다운로드 실행
+            st.info("📥 파일 다운로드 시작...")
+            
+            # content 엔드포인트는 Authorization 헤더 필요
+            if 'graph.microsoft.com' in download_url and '/content' in download_url:
+                download_headers = headers.copy()
+            else:
+                download_headers = {}  # downloadUrl은 이미 인증된 URL
+            
+            file_response = requests.get(download_url, headers=download_headers)
             file_response.raise_for_status()
             
-            st.success("📥 SharePoint 파일 다운로드 완료!")
+            if len(file_response.content) == 0:
+                st.error("❌ 다운로드된 파일이 비어있습니다")
+                return None
+            
+            st.success(f"✅ 파일 다운로드 완료: {len(file_response.content):,} bytes")
             return file_response.content
             
+        except requests.exceptions.HTTPError as e:
+            st.error(f"❌ HTTP 오류: {e.response.status_code} - {e.response.text}")
+            return None
         except Exception as e:
-            st.error(f"❌ SharePoint 파일 다운로드 실패: {e}")
+            st.error(f"❌ SharePoint 파일 다운로드 실패: {str(e)}")
+            st.error(f"🔍 디버그 정보: {type(e).__name__}")
             return None
     
     def get_file_info(self, file_url: str) -> Optional[Dict]:
@@ -891,6 +958,80 @@ def main():
                     """)
                 else:
                     st.error("❌ SharePoint 파일을 찾을 수 없습니다")
+        
+        # 디버그 모드 추가
+        debug_mode = st.checkbox("🔧 디버그 모드 활성화")
+        
+        if debug_mode:
+            st.subheader("🔍 SharePoint 연결 디버깅")
+            
+            if st.button("🗂️ 사이트 드라이브 목록 보기"):
+                with st.spinner("드라이브 정보 조회 중..."):
+                    token = sharepoint_client.get_access_token()
+                    if token:
+                        site_name = st.secrets["sharepoint_files"]["site_name"]
+                        site_id = sharepoint_client.get_site_id(site_name)
+                        
+                        if site_id:
+                            headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+                            drives_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
+                            
+                            try:
+                                drives_response = requests.get(drives_url, headers=headers)
+                                drives_response.raise_for_status()
+                                drives = drives_response.json()['value']
+                                
+                                st.write("**발견된 드라이브:**")
+                                for i, drive in enumerate(drives):
+                                    st.write(f"{i+1}. {drive.get('name', 'Unnamed')} (ID: {drive['id']})")
+                                    st.write(f"   - Type: {drive.get('driveType', 'Unknown')}")
+                                    st.write(f"   - Owner: {drive.get('owner', {}).get('user', {}).get('displayName', 'Unknown')}")
+                                
+                            except Exception as e:
+                                st.error(f"드라이브 조회 실패: {e}")
+            
+            if st.button("📁 파일 검색 테스트"):
+                with st.spinner("파일 검색 테스트 중..."):
+                    token = sharepoint_client.get_access_token()
+                    if token:
+                        site_name = st.secrets["sharepoint_files"]["site_name"]
+                        file_name = st.secrets["sharepoint_files"]["file_name"]
+                        site_id = sharepoint_client.get_site_id(site_name)
+                        
+                        if site_id:
+                            headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+                            drives_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
+                            drives_response = requests.get(drives_url, headers=headers)
+                            drives = drives_response.json()['value']
+                            
+                            for drive in drives:
+                                drive_id = drive['id']
+                                st.write(f"**드라이브 '{drive['name']}'에서 검색:**")
+                                
+                                # 검색 방법 1: Search API
+                                try:
+                                    search_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{file_name}')"
+                                    search_response = requests.get(search_url, headers=headers)
+                                    if search_response.status_code == 200:
+                                        results = search_response.json().get('value', [])
+                                        st.write(f"  - Search API: {len(results)}개 결과")
+                                        for r in results[:3]:  # 처음 3개만
+                                            st.write(f"    * {r['name']} ({r.get('size', 0)} bytes)")
+                                except Exception as e:
+                                    st.write(f"  - Search API 실패: {e}")
+                                
+                                # 검색 방법 2: Root 디렉터리
+                                try:
+                                    root_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/children"
+                                    root_response = requests.get(root_url, headers=headers)
+                                    if root_response.status_code == 200:
+                                        files = root_response.json().get('value', [])
+                                        matching_files = [f for f in files if file_name.lower() in f['name'].lower()]
+                                        st.write(f"  - Root 디렉터리: 전체 {len(files)}개 파일, 일치 {len(matching_files)}개")
+                                        for f in matching_files:
+                                            st.write(f"    * {f['name']} ({f.get('size', 0)} bytes)")
+                                except Exception as e:
+                                    st.write(f"  - Root 디렉터리 실패: {e}")
         
         # BOM 데이터 로딩 버튼
         if st.button("📥 SharePoint에서 BOM 데이터 가져오기", type="primary"):
