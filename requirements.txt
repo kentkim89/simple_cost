@@ -1,7 +1,29 @@
+# Core Streamlit Framework
 streamlit>=1.28.0
+
+# Data Processing & Analysis
 pandas>=2.0.0
 numpy>=1.24.0
+
+# Excel File Handling
 openpyxl>=3.1.0
+xlrd>=2.0.1
+
+# HTTP Requests (SharePoint API)
 requests>=2.31.0
-tqdm>=4.65.0
+
+# Progress Bar (Optional)
+stqdm>=0.0.5
+
+# Data Visualization (Optional)
 plotly>=5.15.0
+
+# Date/Time Handling
+python-dateutil>=2.8.2
+
+# File Type Detection (Optional)
+python-magic>=0.4.27
+
+# Additional pandas dependencies
+pytz>=2023.3
+six>=1.16.0
