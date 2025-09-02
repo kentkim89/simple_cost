@@ -100,7 +100,20 @@ def load_direct_url():
         
         if response.status_code == 200:
             file_content = io.BytesIO(response.content)
-            df = pd.read_excel(file_content, skiprows=1, dtype=str)
+            
+            # Excel 엔진 명시적으로 지정
+            try:
+                df = pd.read_excel(file_content, skiprows=1, dtype=str, engine='openpyxl')
+            except:
+                # 다른 엔진으로 재시도
+                file_content.seek(0)
+                try:
+                    df = pd.read_excel(file_content, skiprows=1, dtype=str, engine='xlrd')
+                except:
+                    # CSV로 시도
+                    file_content.seek(0)
+                    content_str = file_content.getvalue().decode('utf-8')
+                    df = pd.read_csv(io.StringIO(content_str), skiprows=1, dtype=str)
             
             # 데이터 정제
             for col in df.select_dtypes(include=['object']).columns:
@@ -111,7 +124,7 @@ def load_direct_url():
             st.success(f"대안 방법 성공: {len(df)}행")
             return df
         else:
-            st.error("모든 방법 실패")
+            st.error(f"직접 URL 접근 실패: {response.status_code}")
             return None
             
     except Exception as e:
@@ -247,20 +260,6 @@ def main():
     st.set_page_config(page_title="BOM 원가 계산기", layout="wide")
     st.title("BOM 원가 계산기 (SharePoint 연동)")
     
-    # 패스워드 인증
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
-    
-    if not st.session_state.authenticated:
-        password = st.text_input("패스워드", type="password")
-        if st.button("로그인"):
-            if password == st.secrets["BOM_ACCESS_PASSWORD"]:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("잘못된 패스워드")
-        return
-    
     # BOM 데이터 로드
     st.header("1. BOM 데이터 (SharePoint)")
     
@@ -275,7 +274,7 @@ def main():
     purchase_file = st.file_uploader("구매 데이터 파일", type=['csv', 'xlsx'])
     
     if purchase_file:
-        purchase_df = pd.read_excel(purchase_file, dtype=str)
+        purchase_df = pd.read_excel(purchase_file, dtype=str, engine='openpyxl')
         st.success(f"구매 데이터 로드: {len(purchase_df)}행")
         
         # BOM 계산 실행
