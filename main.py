@@ -1,5 +1,5 @@
 """
-BOM 원가 계산기 - 경량 안정성 버전 + SharePoint 연동
+BOM 원가 계산기 - 경량화 안정성 버전
 핵심 기능만 유지하며 안정성을 확보한 경량 버전
 """
 
@@ -28,12 +28,6 @@ try:
 except ImportError:
     HAS_PLOTLY = False
 
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
-
 class Config:
     """설정 클래스"""
     MAX_FILE_SIZE_MB = 100
@@ -45,420 +39,11 @@ def validate_file_size(file_obj, max_mb: int = 100) -> bool:
     try:
         size_mb = len(file_obj.getvalue()) / (1024 * 1024)
         if size_mb > max_mb:
-            st.error(f"파일이 너무 큽니다: {size_mb:.1f}MB > {max_mb}MB")
+            st.error(f"❌ 파일이 너무 큽니다: {size_mb:.1f}MB > {max_mb}MB")
             return False
         return True
     except Exception:
         return False
-
-def load_from_sharepoint_url(url: str, file_type: str = "unknown") -> Optional[pd.DataFrame]:
-    """SharePoint 직접 링크로 파일 로딩 (인증 문제 해결)"""
-    try:
-        if not url or not url.strip():
-            return None
-            
-        url = url.strip()
-        
-        # SharePoint URL 형식 확인 및 변환
-        download_url = url
-        if 'sharepoint.com' in url:
-            # 공유 링크 형태 변환
-            if '/:x:/' in url or '/:b:/' in url or '/:w:/' in url:
-                if '?e=' in url:
-                    base_url = url.split('?e=')[0]
-                    download_url = base_url + '?download=1'
-                else:
-                    download_url = url + ('&' if '?' in url else '?') + 'download=1'
-            elif '?web=1' in url:
-                download_url = url.replace('?web=1', '?download=1')
-            elif '/Documents/' in url or '/Shared%20Documents/' in url:
-                download_url = url + ('&' if '?' in url else '?') + 'download=1'
-            else:
-                download_url = url + ('&' if '?' in url else '?') + 'download=1'
-        
-        st.info(f"SharePoint 파일 접근 시도 중...")
-        
-        # 파일 다운로드 및 로딩
-        skiprows = 1 if file_type == "bom" else 0
-        
-        if not HAS_REQUESTS:
-            st.error("requests 라이브러리가 필요합니다.")
-            return None
-            
-        import requests
-        
-        # 여러 방법으로 시도
-        methods = [
-            # 방법 1: 기본 다운로드 링크
-            {'url': download_url, 'headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}},
-            
-            # 방법 2: 원본 링크 직접 접근
-            {'url': url, 'headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}},
-            
-            # 방법 3: 익명 접근 시도
-            {'url': url.replace(':x:', ':v:'), 'headers': {'User-Agent': 'Microsoft Excel'}},
-        ]
-        
-        for i, method in enumerate(methods, 1):
-            try:
-                st.info(f"접근 방법 {i} 시도 중...")
-                
-                response = requests.get(
-                    method['url'], 
-                    headers=method['headers'], 
-                    allow_redirects=True,
-                    timeout=30
-                )
-                
-                # 상태 코드 확인
-                if response.status_code == 200:
-                    # 응답 내용이 HTML인지 확인 (로그인 페이지 등)
-                    content_type = response.headers.get('content-type', '').lower()
-                    
-                    if 'html' in content_type:
-                        st.warning(f"방법 {i}: HTML 응답 (로그인 페이지일 가능성)")
-                        continue
-                        
-                    # Excel 파일 시도
-                    try:
-                        file_content = io.BytesIO(response.content)
-                        
-                        # 파일 시그니처 확인
-                        file_content.seek(0)
-                        first_bytes = file_content.read(8)
-                        file_content.seek(0)
-                        
-                        # Excel 파일 시그니처 확인
-                        if first_bytes[:2] == b'PK' or first_bytes[:4] == b'\xd0\xcf\x11\xe0':
-                            df = pd.read_excel(file_content, skiprows=skiprows, dtype=str, engine='openpyxl')
-                        else:
-                            st.warning(f"방법 {i}: Excel 파일이 아닌 것으로 보임")
-                            continue
-                            
-                        if df is not None and not df.empty:
-                            # 데이터 정제
-                            for col in df.select_dtypes(include=['object']).columns:
-                                df[col] = df[col].astype(str).str.strip()
-                            
-                            # 빈 행/열 제거
-                            df = df.dropna(how='all').dropna(axis=1, how='all')
-                            
-                            st.success(f"SharePoint 파일 로딩 성공 (방법 {i}): {len(df)}행 × {len(df.columns)}열")
-                            return df
-                            
-                    except Exception as e:
-                        st.warning(f"방법 {i}: Excel 파일 파싱 실패 - {e}")
-                        continue
-                        
-                else:
-                    st.warning(f"방법 {i}: HTTP {response.status_code} 오류")
-                    
-            except Exception as e:
-                st.warning(f"방법 {i}: 연결 실패 - {e}")
-                continue
-        
-        # 모든 방법 실패
-        st.error("모든 접근 방법이 실패했습니다.")
-        show_sharepoint_alternatives()
-        return None
-            
-    except Exception as e:
-        st.error(f"SharePoint 파일 처리 중 오류: {e}")
-        show_sharepoint_alternatives()
-        return None
-
-def implement_office365_login():
-    """Office 365 실제 로그인 인증 (Level 2)"""
-    
-    # 세션 상태 초기화
-    if 'office365_authenticated' not in st.session_state:
-        st.session_state.office365_authenticated = False
-        st.session_state.user_info = None
-    
-    if not st.session_state.office365_authenticated:
-        st.warning("🔐 Office 365 계정으로 로그인해주세요.")
-        
-        # Office 365 로그인 UI
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            office365_email = st.text_input(
-                "Office 365 이메일 주소", 
-                placeholder="user@goremi.co.kr",
-                key="o365_email"
-            )
-            office365_password = st.text_input(
-                "Office 365 패스워드", 
-                type="password",
-                key="o365_password"
-            )
-            
-        with col2:
-            st.write("") # 간격
-            st.write("") # 간격
-            login_button = st.button("🚀 Office 365 로그인", key="o365_login", type="primary")
-        
-        if login_button and office365_email and office365_password:
-            # Office 365 인증 시도
-            success, user_info, error_msg = authenticate_office365(office365_email, office365_password)
-            
-            if success:
-                st.session_state.office365_authenticated = True
-                st.session_state.user_info = user_info
-                st.success(f"✅ 로그인 성공: {user_info.get('displayName', office365_email)}")
-                st.rerun()
-            else:
-                st.error(f"❌ 로그인 실패: {error_msg}")
-        
-        # 로그인 도움말
-        with st.expander("로그인 도움말"):
-            st.info("""
-            **Office 365 로그인 방법:**
-            - 회사에서 제공받은 Office 365 계정 사용
-            - 이메일 형식: user@goremi.co.kr
-            - 일반적으로 Outlook, Teams에 사용하는 동일한 계정
-            
-            **문제 해결:**
-            - 2단계 인증이 설정된 경우: IT 팀에 문의
-            - 계정 잠김: IT 관리자에게 문의
-            - 비밀번호 초기화: Office 365 포털에서 진행
-            """)
-        
-        return False
-        
-    else:
-        # 인증된 상태 표시
-        user_name = st.session_state.user_info.get('displayName', 'Unknown User')
-        user_email = st.session_state.user_info.get('userPrincipalName', 'unknown@email.com')
-        
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.success(f"🔓 Office 365 로그인됨: **{user_name}** ({user_email})")
-        with col2:
-            if st.button("🚪 로그아웃", key="o365_logout", help="Office 365 로그아웃"):
-                st.session_state.office365_authenticated = False
-                st.session_state.user_info = None
-                st.rerun()
-        
-        return True
-
-def authenticate_office365(email: str, password: str) -> tuple[bool, dict, str]:
-    """실제 Office 365 인증 수행"""
-    try:
-        # MSAL을 사용한 실제 Microsoft 인증
-        import msal
-        
-        # Azure AD 앱 설정 (Streamlit Secrets에서)
-        try:
-            client_id = st.secrets["MICROSOFT_CLIENT_ID"]
-            authority = f"https://login.microsoftonline.com/{st.secrets['MICROSOFT_TENANT_ID']}"
-        except KeyError:
-            return False, {}, "Azure AD 앱 설정이 없습니다. IT 팀에 문의하세요."
-        
-        # Public Client App 생성 (사용자 인증용)
-        app = msal.PublicClientApplication(
-            client_id=client_id,
-            authority=authority
-        )
-        
-        # Resource Owner Password Credentials (ROPC) Flow
-        # 주의: 이 방법은 2FA가 활성화된 계정에서는 작동하지 않음
-        result = app.acquire_token_by_username_password(
-            username=email,
-            password=password,
-            scopes=["https://graph.microsoft.com/User.Read"]
-        )
-        
-        if "access_token" in result:
-            # Microsoft Graph API로 사용자 정보 가져오기
-            import requests
-            
-            headers = {'Authorization': f"Bearer {result['access_token']}"}
-            response = requests.get('https://graph.microsoft.com/v1.0/me', headers=headers)
-            
-            if response.status_code == 200:
-                user_info = response.json()
-                return True, user_info, ""
-            else:
-                return False, {}, "사용자 정보를 가져올 수 없습니다."
-        
-        else:
-            error_description = result.get('error_description', 'Unknown error')
-            return False, {}, error_description
-            
-    except ImportError:
-        return False, {}, "msal 라이브러리가 필요합니다. (pip install msal)"
-    except Exception as e:
-        return False, {}, f"인증 오류: {str(e)}"
-
-def implement_hybrid_auth():
-    """하이브리드 인증 (간단한 패스워드 + Office 365 옵션)"""
-    st.subheader("🔐 인증 방법 선택")
-    
-    auth_method = st.radio(
-        "로그인 방식을 선택하세요",
-        ["간단한 패스워드", "Office 365 로그인"],
-        horizontal=True
-    )
-    
-    if auth_method == "간단한 패스워드":
-        return implement_simple_password_auth()
-    else:
-        return implement_office365_login()
-
-def show_authentication_levels():
-    """인증 레벨 설명"""
-    with st.expander("🔒 인증 레벨 설명", expanded=False):
-        st.markdown("""
-        ### 🟢 Level 1: 간단한 패스워드
-        - **방법**: 고정된 패스워드 입력
-        - **설정**: 코드에 직접 설정 또는 Streamlit Secrets
-        - **보안 수준**: ⭐⭐
-        - **구현 난이도**: 쉬움 (즉시 적용)
-        
-        ### 🟡 Level 2: Office 365 실제 로그인  
-        - **방법**: 회사 Office 365 계정으로 실제 로그인
-        - **필요사항**: Azure AD 앱 등록, MSAL 라이브러리
-        - **보안 수준**: ⭐⭐⭐⭐
-        - **구현 난이도**: 중간 (IT 팀 협업 필요)
-        - **장점**: 실제 회사 계정 검증, 자동 권한 관리
-        
-        ### 🔴 Level 3: Azure AD + Graph API 
-        - **방법**: 서비스 계정 + 세밀한 권한 제어
-        - **필요사항**: Azure AD 앱, Graph API 권한
-        - **보안 수준**: ⭐⭐⭐⭐⭐  
-        - **구현 난이도**: 어려움 (전문 설정)
-        - **장점**: 최고 보안, 감사 로그, 자동 토큰 관리
-        """)
-    
-    st.markdown("""
-    ### 📋 Level 2 구현을 위한 필요사항:
-    
-    **1. Azure AD 앱 등록 (IT 팀 작업)**
-    ```
-    - Azure Portal → Azure Active Directory
-    - App registrations → New registration  
-    - Authentication → Add platform → Mobile/Desktop
-    - API permissions → Microsoft Graph → User.Read
-    ```
-    
-    **2. Streamlit Secrets 설정**
-    ```toml
-    [default]
-    MICROSOFT_CLIENT_ID = "your_azure_app_client_id"
-    MICROSOFT_TENANT_ID = "your_tenant_id"
-    ```
-    
-    **3. 추가 패키지 설치**
-    ```bash
-    pip install msal requests
-    ```
-    """)
-
-# 메인 함수 수정 버전
-def secure_main_with_options():
-    """보안 옵션이 있는 메인 함수"""
-    
-    st.title("BOM 원가 계산기 (다단계 보안)")
-    
-    # 인증 레벨 설명
-    show_authentication_levels()
-    
-    # 하이브리드 인증 (사용자가 선택)
-    if not implement_hybrid_auth():
-        st.stop()
-    
-    st.success("🎉 인증 완료! BOM 원가 계산을 시작할 수 있습니다.")
-    
-    # 나머지 기존 코드...
-    """간단한 패스워드 인증 구현"""
-    # 세션 상태 초기화
-    if 'bom_authenticated' not in st.session_state:
-        st.session_state.bom_authenticated = False
-    
-    if not st.session_state.bom_authenticated:
-        st.warning("🔐 BOM 데이터 접근을 위한 인증이 필요합니다.")
-        
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            password = st.text_input("BOM 데이터 접근 패스워드", type="password", key="bom_password")
-        with col2:
-            st.write("") # 간격
-            auth_button = st.button("인증하기", key="auth_submit", type="primary")
-        
-        if auth_button and password:
-            # Streamlit secrets 또는 기본 패스워드 확인
-            try:
-                correct_password = st.secrets.get("BOM_ACCESS_PASSWORD", "goremi2024!")
-            except:
-                correct_password = "goremi2024!"  # secrets 없을 때 기본값
-            
-            if password == correct_password:
-                st.session_state.bom_authenticated = True
-                st.success("✅ 인증 성공!")
-                st.rerun()
-            else:
-                st.error("❌ 잘못된 패스워드입니다.")
-        
-        # 패스워드 힌트
-        with st.expander("패스워드 문의"):
-            st.info("패스워드를 잊으셨나요? 시스템 관리자에게 문의하세요.")
-        
-        return False
-    else:
-        # 인증된 상태
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.success("🔓 BOM 데이터 접근 권한이 확인되었습니다.")
-        with col2:
-            if st.button("🔒", key="lock_bom", help="BOM 데이터 잠금"):
-                st.session_state.bom_authenticated = False
-                st.rerun()
-        
-        return True
-    """SharePoint 접근 실패시 대안 제시"""
-    st.write("---")
-    st.subheader("🔐 SharePoint 접근 문제 해결 방법")
-    
-    with st.expander("해결 방법들", expanded=True):
-        st.markdown("""
-        ### 🎯 즉시 해결 방법 (추천)
-        
-        **1. 파일 다운로드 후 업로드**
-        - SharePoint에서 BOM 파일을 로컬로 다운로드
-        - 아래 '임시 BOM 파일 업로드' 사용
-        
-        **2. 링크 권한 변경**
-        - SharePoint에서 파일 우클릭 → '공유'
-        - '링크 설정 변경' → '조직 내 모든 사용자'
-        - '권한' → '편집 가능' 또는 '보기 가능' 선택
-        
-        ### 🔧 근본적 해결 (IT 팀 협업 필요)
-        
-        **3. 서비스 계정 설정**
-        - Azure AD 앱 등록 및 권한 부여
-        - Microsoft Graph API 인증 구성
-        - 자동 인증으로 파일 접근
-        
-        **4. 공용 폴더 설정**
-        - SharePoint에 BOM 전용 공용 폴더 생성
-        - 조직 내 모든 사용자 읽기 권한 부여
-        """)
-    
-    # 임시 해결책: BOM 파일 업로드 옵션 추가
-    st.subheader("🆘 임시 해결: BOM 파일 업로드")
-    
-    temp_bom_file = st.file_uploader(
-        "SharePoint 접근이 안 되는 경우, BOM 파일을 직접 업로드하세요",
-        type=['csv', 'xlsx', 'xls'],
-        key="temp_bom",
-        help="SharePoint에서 다운로드한 BOM 파일을 여기에 업로드"
-    )
-    
-    if temp_bom_file:
-        return safe_load_data(temp_bom_file.getvalue(), temp_bom_file.name, skiprows=1)
-    
-    return None
 
 def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Optional[pd.DataFrame]:
     """안전한 파일 로딩"""
@@ -476,13 +61,13 @@ def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Op
                 except:
                     continue
             else:
-                st.error("CSV 파일 인코딩을 감지할 수 없습니다")
+                st.error("❌ CSV 파일 인코딩을 감지할 수 없습니다")
                 return None
                 
         elif file_name.lower().endswith(('.xlsx', '.xls')):
             df = pd.read_excel(file_obj, skiprows=skiprows, dtype=str)
         else:
-            st.error("지원하지 않는 파일 형식")
+            st.error("❌ 지원하지 않는 파일 형식")
             return None
         
         # 헤더 문제 해결 (구매 데이터용)
@@ -499,12 +84,14 @@ def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Op
         return df if not df.empty else None
         
     except Exception as e:
-        st.error(f"파일 로딩 실패: {e}")
+        st.error(f"❌ 파일 로딩 실패: {e}")
         return None
 
 def fix_purchase_data_headers(df: pd.DataFrame) -> pd.DataFrame:
     """구매 데이터 헤더 문제 해결"""
     try:
+        st.info("🔧 구매 데이터 헤더 문제를 감지했습니다. 자동으로 수정합니다...")
+        
         # 첫 번째 행에서 실제 헤더 찾기
         potential_headers = None
         
@@ -520,6 +107,7 @@ def fix_purchase_data_headers(df: pd.DataFrame) -> pd.DataFrame:
             if keyword_count >= 3:  # 3개 이상의 키워드가 있으면 헤더로 판단
                 potential_headers = row_values
                 header_row_idx = i
+                st.info(f"📋 {i}행에서 실제 헤더를 발견했습니다: {keyword_count}개 키워드 매칭")
                 break
         
         if potential_headers:
@@ -542,13 +130,17 @@ def fix_purchase_data_headers(df: pd.DataFrame) -> pd.DataFrame:
             # 빈 행 제거
             new_df = new_df.dropna(how='all')
             
+            st.success(f"✅ 헤더 수정 완료: {len(cleaned_headers)}개 컬럼, {len(new_df)}행 데이터")
+            st.write("**수정된 헤더:**", cleaned_headers[:10])  # 처음 10개만 표시
+            
             return new_df
         
         else:
+            st.warning("⚠️ 적절한 헤더를 찾을 수 없습니다. 원본 데이터를 사용합니다.")
             return df
         
     except Exception as e:
-        st.error(f"헤더 수정 중 오류: {e}")
+        st.error(f"❌ 헤더 수정 중 오류: {e}")
         return df
 
 def validate_bom_data(df: pd.DataFrame) -> Tuple[bool, str]:
@@ -569,39 +161,48 @@ def validate_bom_data(df: pd.DataFrame) -> Tuple[bool, str]:
         return False, f"검증 오류: {e}"
 
 def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
-    """구매 데이터에서 단가 추출"""
+    """구매 데이터에서 단가 추출 (헤더 문제 해결 포함)"""
     try:
         if df.empty:
             return {}
         
-        # 컬럼 자동 감지
+        st.write("📊 **구매 데이터 분석 중...**")
+        st.write(f"- 원본 컬럼: {list(df.columns)[:5]}...")  # 처음 5개만 표시
+        
+        # 컬럼 자동 감지 (개선된 버전)
         date_col, item_col, price_col = None, None, None
         
         # 각 컬럼명을 분석하여 매칭
         for col in df.columns:
             col_str = str(col).lower()
+            col_original = str(col)
             
             # 일자 컬럼 감지
             if not date_col:
                 if any(keyword in col_str for keyword in ['일자', 'date', '날짜']) or '일자-no' in col_str:
                     date_col = col
+                    st.info(f"📅 일자 컬럼 발견: '{col_original}'")
             
             # 품목코드 컬럼 감지  
             if not item_col:
                 if '품목코드' in col_str:
                     item_col = col
+                    st.info(f"🔖 품목코드 컬럼 발견: '{col_original}'")
             
             # 단가 컬럼 감지
             if not price_col:
                 if '단가' in col_str and '공급' not in col_str and '총' not in col_str:
                     price_col = col
+                    st.info(f"💰 단가 컬럼 발견: '{col_original}'")
         
         # 컬럼을 찾지 못한 경우 인덱스로 대체
         if not date_col and len(df.columns) > 0:
             date_col = df.columns[0]
+            st.warning(f"⚠️ 일자 컬럼을 자동 설정: '{date_col}'")
             
         if not item_col and len(df.columns) > 1:
             item_col = df.columns[1]
+            st.warning(f"⚠️ 품목코드 컬럼을 자동 설정: '{item_col}'")
             
         if not price_col:
             # 단가 관련 컬럼 우선 탐색
@@ -612,6 +213,7 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
                     try:
                         float(sample_value.replace(',', ''))
                         price_col = col
+                        st.warning(f"⚠️ 단가 컬럼을 추정 설정: '{col}' (샘플값: {sample_value})")
                         break
                     except:
                         continue
@@ -619,10 +221,13 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
             # 그래도 없으면 기본값
             if not price_col and len(df.columns) > 5:
                 price_col = df.columns[5]
+                st.warning(f"⚠️ 단가 컬럼을 기본 설정: '{price_col}'")
         
         if not all([date_col, item_col, price_col]):
-            st.error(f"필수 컬럼을 찾을 수 없습니다.")
+            st.error(f"❌ 필수 컬럼을 찾을 수 없습니다. 일자: {date_col}, 품목코드: {item_col}, 단가: {price_col}")
             return {}
+        
+        st.success(f"✅ 컬럼 매핑 완료 - 일자: {date_col}, 품목코드: {item_col}, 단가: {price_col}")
         
         # 데이터 정제
         work_df = df[[date_col, item_col, price_col]].copy()
@@ -644,17 +249,18 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
         ]
         
         if work_df.empty:
-            st.error("유효한 구매 데이터가 없습니다.")
+            st.error("❌ 유효한 구매 데이터가 없습니다.")
             return {}
         
-        # 날짜 처리
+        # 날짜 처리 (간단하게)
         try:
             work_df['date_str'] = work_df['date'].astype(str).str.split('-').str[0]
             work_df['date_parsed'] = pd.to_datetime(work_df['date_str'], errors='coerce')
             work_df = work_df.dropna(subset=['date_parsed'])
             work_df = work_df.sort_values('date_parsed', ascending=False)
+            st.info("📅 날짜순 정렬 완료")
         except:
-            pass  # 날짜 정렬 실패해도 계속 진행
+            st.warning("⚠️ 날짜 정렬 실패, 원본 순서 유지")
         
         # 최신 단가 추출
         latest_prices = work_df.drop_duplicates(subset='item_code', keep='first')
@@ -667,10 +273,15 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
             if pd.notna(price) and price > 0:
                 price_dict[code] = float(price)
         
+        st.write(f"**구매단가 샘플 (처음 5개):**")
+        sample_items = list(price_dict.items())[:5]
+        for code, price in sample_items:
+            st.write(f"  • {code}: {price:,.0f}원")
+        
         return price_dict
         
     except Exception as e:
-        st.error(f"구매 단가 추출 오류: {e}")
+        st.error(f"❌ 구매 단가 추출 오류: {e}")
         return {}
 
 def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -681,7 +292,7 @@ def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
         # 필수 컬럼 확인
         missing_cols = [col for col in Config.REQUIRED_BOM_COLS if col not in clean_df.columns]
         if missing_cols:
-            st.error(f"필수 컬럼 누락: {missing_cols}")
+            st.error(f"❌ 필수 컬럼 누락: {missing_cols}")
             return pd.DataFrame()
         
         # 데이터 정제 - 검증 전에 타입 변환
@@ -697,7 +308,7 @@ def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
         after_count = len(clean_df)
         
         if before_count != after_count:
-            st.info(f"test 품목 제거: {before_count:,} → {after_count:,}행")
+            st.info(f"🧹 test 품목 제거: {before_count:,} → {after_count:,}행")
         
         # 유효하지 않은 데이터 제거
         clean_df = clean_df[
@@ -711,7 +322,7 @@ def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
         return clean_df
         
     except Exception as e:
-        st.error(f"BOM 데이터 정제 오류: {e}")
+        st.error(f"❌ BOM 데이터 정제 오류: {e}")
         return pd.DataFrame()
 
 def calculate_product_cost_with_reason(product_code: str, bom_df: pd.DataFrame, all_costs: Dict[str, float], cache: Dict[str, float]) -> Tuple[float, str]:
@@ -801,7 +412,7 @@ def calculate_all_bom_costs(bom_df: pd.DataFrame, purchase_prices: Dict[str, flo
         # 모든 생산품목
         all_products = clean_bom[['생산품목코드', '생산품목명']].drop_duplicates().reset_index(drop=True)
         
-        st.info(f"계산 대상: 생산품목 {len(all_products):,}개, 구매단가 {len(purchase_prices):,}개")
+        st.info(f"📊 계산 대상: 생산품목 {len(all_products):,}개, 구매단가 {len(purchase_prices):,}개")
         
         # 전체 원가 딕셔너리
         all_costs = purchase_prices.copy()
@@ -853,12 +464,12 @@ def calculate_all_bom_costs(bom_df: pd.DataFrame, purchase_prices: Dict[str, flo
         details_df['부품별원가'] = details_df['소요량'] * details_df['부품단가']
         
         elapsed = time.time() - start_time
-        st.success(f"계산 완료! (소요시간: {elapsed:.1f}초)")
+        st.success(f"✅ 계산 완료! (소요시간: {elapsed:.1f}초)")
         
         return result_df, details_df
         
     except Exception as e:
-        st.error(f"BOM 원가 계산 실패: {e}")
+        st.error(f"❌ BOM 원가 계산 실패: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 def create_simple_chart(df: pd.DataFrame) -> None:
@@ -890,50 +501,7 @@ def create_simple_chart(df: pd.DataFrame) -> None:
     except Exception:
         pass  # 차트 실패해도 진행
 
-def show_sharepoint_alternatives():
-    """SharePoint 접근 실패시 대안 제시"""
-    st.write("---")
-    st.subheader("🔐 SharePoint 접근 문제 해결 방법")
-    
-    with st.expander("해결 방법들", expanded=True):
-        st.markdown("""
-        ### 🎯 즉시 해결 방법 (추천)
-        
-        **1. 파일 다운로드 후 업로드**
-        - SharePoint에서 BOM 파일을 로컬로 다운로드
-        - 아래 '임시 BOM 파일 업로드' 사용
-        
-        **2. 링크 권한 변경**
-        - SharePoint에서 파일 우클릭 → '공유'
-        - '링크 설정 변경' → '조직 내 모든 사용자'
-        - '권한' → '편집 가능' 또는 '보기 가능' 선택
-        
-        ### 🔧 근본적 해결 (IT 팀 협업 필요)
-        
-        **3. 서비스 계정 설정**
-        - Azure AD 앱 등록 및 권한 부여
-        - Microsoft Graph API 인증 구성
-        - 자동 인증으로 파일 접근
-        
-        **4. 공용 폴더 설정**
-        - SharePoint에 BOM 전용 공용 폴더 생성
-        - 조직 내 모든 사용자 읽기 권한 부여
-        """)
-    
-    # 임시 해결책: BOM 파일 업로드 옵션 추가
-    st.subheader("🆘 임시 해결: BOM 파일 업로드")
-    
-    temp_bom_file = st.file_uploader(
-        "SharePoint 접근이 안 되는 경우, BOM 파일을 직접 업로드하세요",
-        type=['csv', 'xlsx', 'xls'],
-        key="temp_bom",
-        help="SharePoint에서 다운로드한 BOM 파일을 여기에 업로드"
-    )
-    
-    if temp_bom_file:
-        return safe_load_data(temp_bom_file.getvalue(), temp_bom_file.name, skiprows=1)
-    
-    return None
+def auto_adjust_column_width(worksheet, df: pd.DataFrame, start_row: int = 1):
     """엑셀 컬럼 너비 자동 조정"""
     try:
         from openpyxl.utils import get_column_letter
@@ -1087,7 +655,7 @@ def export_to_excel(finished_goods: pd.DataFrame, all_results: pd.DataFrame, det
         return output.getvalue()
         
     except Exception as e:
-        st.error(f"엑셀 생성 오류: {e}")
+        st.error(f"❌ 엑셀 생성 오류: {e}")
         return b''
 
 def main():
@@ -1099,148 +667,84 @@ def main():
         layout="wide"
     )
     
-    st.title("BOM 원가 계산기 (보안 강화)")
-    st.markdown("**인증된 사용자만 접근 가능한 안전한 BOM 원가 계산**")
-    
-    # 🔐 1단계: 사용자 인증 (가장 먼저)
-    if not implement_simple_password_auth():
-        st.stop()  # 인증 실패시 여기서 완전 중단
-    
-    # 인증 성공 후에만 아래 코드 실행
-    st.success("🎉 인증이 완료되었습니다. BOM 원가 계산을 시작할 수 있습니다.")
+    st.title("🏭 BOM 원가 계산기 (경량 안정성 버전)")
+    st.markdown("**✨ 핵심 기능에 집중한 안정적이고 가벼운 버전**")
     
     # 기능 상태 표시
     with st.sidebar:
-        st.header("시스템 상태")
+        st.header("📊 시스템 상태")
         st.info(f"""
         **활성화된 기능:**
-        - 진행률 표시: {'사용가능' if HAS_PROGRESS else '미사용'}
-        - 시각화: {'사용가능' if HAS_PLOTLY else '미사용'}
-        - SharePoint 연동: {'사용가능' if HAS_REQUESTS else '미사용'}
+        - 진행률 표시: {'✅' if HAS_PROGRESS else '❌'}
+        - 시각화: {'✅' if HAS_PLOTLY else '❌'}
         """)
-        
-        # 보안 정보
-        st.header("보안 정보")
-        st.success("🔐 인증된 세션")
-        
-        # 접근 로그 (간단하게)
-        if 'access_log' not in st.session_state:
-            st.session_state.access_log = []
-        
-        # 현재 접근 기록
-        current_access = {
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'action': 'bom_access_granted'
-        }
-        
-        if current_access not in st.session_state.access_log:
-            st.session_state.access_log.append(current_access)
-        
-        st.info(f"마지막 접근: {current_access['timestamp']}")
     
     # 파일 업로드
-    st.header("1. 데이터 소스")
+    st.header("1. 📁 파일 업로드")
     
-    # SharePoint BOM 데이터 (고정)
-    st.subheader("BOM 데이터 (SharePoint - 인증된 접근)")
+    col1, col2 = st.columns(2)
     
-    # 기본 SharePoint 링크
-    default_bom_url = "https://goremi-my.sharepoint.com/:x:/g/personal/chkim_goremi_co_kr/EZlSRwjY6dNItnv6EL0H_esBtLEQl70PED-59C_iQzd0OQ?e=FE79vq"
+    with col1:
+        bom_file = st.file_uploader("📋 BOM 데이터 파일", type=['csv', 'xlsx', 'xls'], key="bom")
+        
+    with col2:
+        purchase_file = st.file_uploader("💰 구매 데이터 파일", type=['csv', 'xlsx', 'xls'], key="purchase")
     
-    bom_url = st.text_input(
-        "BOM 데이터 SharePoint 링크",
-        value=default_bom_url,
-        help="🔒 인증된 사용자만 접근 가능한 보안 링크"
-    )
-    
-    # SharePoint BOM 데이터 자동 로딩
-    bom_df = None
-    if bom_url:
-        with st.spinner("🔐 인증된 SharePoint에서 BOM 데이터 로딩 중..."):
-            bom_df = load_from_sharepoint_url(bom_url, "bom")
-            if bom_df is not None:
-                st.success(f"✅ BOM 데이터 로드 완료: {len(bom_df):,}행 × {len(bom_df.columns)}열")
-                
-                # 보안 로그 업데이트
-                st.session_state.access_log.append({
-                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'action': 'bom_data_loaded',
-                    'rows': len(bom_df)
-                })
-            else:
-                st.error("❌ SharePoint BOM 데이터 로딩 실패")
-                # 임시 해결책 제공
-                temp_bom = show_sharepoint_alternatives()
-                if temp_bom is not None:
-                    bom_df = temp_bom
-                    st.success("✅ 임시 BOM 파일 업로드 완료!")
-    
-    # 구매 데이터 (파일 업로드)
-    st.subheader("구매 데이터 (파일 업로드)")
-    
-    purchase_df = None
-    purchase_file = st.file_uploader(
-        "구매 데이터 파일을 업로드하세요", 
-        type=['csv', 'xlsx', 'xls'], 
-        key="purchase",
-        help="Excel 또는 CSV 파일 (최대 100MB)"
-    )
-    
-    if purchase_file:
-        if validate_file_size(purchase_file):
-            with st.spinner("구매 데이터 파일 처리 중..."):
-                purchase_df = safe_load_data(purchase_file.getvalue(), purchase_file.name)
-                if purchase_df is not None:
-                    st.success(f"구매 데이터 로드 완료: {len(purchase_df):,}행 × {len(purchase_df.columns)}열")
-                    # 헤더 문제 해결
-                    if any('Unnamed:' in str(col) for col in purchase_df.columns):
-                        purchase_df = fix_purchase_data_headers(purchase_df)
-                else:
-                    st.error("구매 데이터 로딩 실패")
-    
-    if (bom_df is not None and purchase_df is not None):
+    if bom_file and purchase_file:
+        
+        # 파일 크기 확인
+        if not validate_file_size(bom_file) or not validate_file_size(purchase_file):
+            st.stop()
+        
+        # 파일 로딩
+        with st.spinner("📖 파일 로딩 중..."):
+            bom_df = safe_load_data(bom_file.getvalue(), bom_file.name, skiprows=1)
+            purchase_df = safe_load_data(purchase_file.getvalue(), purchase_file.name)
+        
+        if bom_df is None or purchase_df is None:
+            st.stop()
         
         # 간단한 검증
         bom_valid, bom_msg = validate_bom_data(bom_df)
         if not bom_valid:
-            st.error(f"BOM 데이터 오류: {bom_msg}")
+            st.error(f"❌ BOM 데이터 오류: {bom_msg}")
             st.stop()
         
         # 데이터 미리보기
-        st.header("2. 데이터 미리보기")
+        st.header("2. 📋 데이터 미리보기")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("BOM 데이터 (SharePoint)")
-            st.info(f"{len(bom_df):,}행 × {len(bom_df.columns)}열")
+            st.subheader("📋 BOM 데이터")
+            st.info(f"📊 {len(bom_df):,}행 × {len(bom_df.columns)}열")
             st.dataframe(bom_df.head(3), use_container_width=True)
             
         with col2:
-            st.subheader("구매 데이터 (업로드)")
-            st.info(f"{len(purchase_df):,}행 × {len(purchase_df.columns)}열")
+            st.subheader("💰 구매 데이터")
+            st.info(f"📊 {len(purchase_df):,}행 × {len(purchase_df.columns)}열")
             st.dataframe(purchase_df.head(3), use_container_width=True)
         
         # 원가 계산
-        st.header("3. BOM 원가 계산")
+        st.header("3. 🚀 BOM 원가 계산")
         
-        if st.button("원가 계산 시작!", type="primary", use_container_width=True):
+        if st.button("💪 원가 계산 시작!", type="primary", use_container_width=True):
             
             # 구매 단가 추출
-            with st.spinner("구매 단가 추출 중..."):
+            with st.spinner("💰 구매 단가 추출 중..."):
                 purchase_prices = extract_purchase_prices(purchase_df)
             
             if not purchase_prices:
-                st.error("구매 단가를 추출할 수 없습니다.")
+                st.error("❌ 구매 단가를 추출할 수 없습니다.")
                 st.stop()
             
-            st.success(f"구매 단가 추출 완료: {len(purchase_prices):,}개 품목")
+            st.success(f"✅ 구매 단가 추출 완료: {len(purchase_prices):,}개 품목")
             
             # BOM 원가 계산
             result_df, details_df = calculate_all_bom_costs(bom_df, purchase_prices)
             
             if result_df.empty:
-                st.error("BOM 원가 계산 실패")
+                st.error("❌ BOM 원가 계산 실패")
                 st.stop()
             
             # 완제품 필터링
@@ -1249,7 +753,7 @@ def main():
             ].copy()
             
             # 결과 표시
-            st.header("4. 완제품 원가 결과")
+            st.header("4. 🎯 완제품 원가 결과")
             
             # 통계
             total = len(finished_goods)
@@ -1258,11 +762,11 @@ def main():
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("전체 완제품", f"{total:,}개")
+                st.metric("🎯 전체 완제품", f"{total:,}개")
             with col2:
-                st.metric("계산 성공", f"{calculated:,}개")
+                st.metric("✅ 계산 성공", f"{calculated:,}개")
             with col3:
-                st.metric("성공률", f"{success_rate:.1f}%")
+                st.metric("📊 성공률", f"{success_rate:.1f}%")
             
             # 결과 테이블
             if not finished_goods.empty:
@@ -1290,7 +794,7 @@ def main():
                 # 실패 이유 분석 요약
                 failed_items = finished_goods[finished_goods['계산상태'] == '계산불가']
                 if not failed_items.empty and '실패이유' in failed_items.columns:
-                    st.subheader("계산 실패 원인 분석")
+                    st.subheader("⚠️ 계산 실패 원인 분석")
                     
                     # 실패 이유별 통계
                     failure_stats = {}
@@ -1322,38 +826,38 @@ def main():
                     max_cost = calculated_items['계산된단위원가'].max()
                     min_cost = calculated_items[calculated_items['계산된단위원가'] > 0]['계산된단위원가'].min()
                     
-                    st.subheader("원가 통계")
+                    st.subheader("📈 원가 통계")
                     col1, col2, col3 = st.columns(3)
                     
                     with col1:
-                        st.metric("평균 원가", f"{avg_cost:,.0f}원")
+                        st.metric("💰 평균 원가", f"{avg_cost:,.0f}원")
                     with col2:
-                        st.metric("최고 원가", f"{max_cost:,.0f}원")
+                        st.metric("📈 최고 원가", f"{max_cost:,.0f}원")
                     with col3:
-                        st.metric("최저 원가", f"{min_cost:,.0f}원")
+                        st.metric("📉 최저 원가", f"{min_cost:,.0f}원")
                 
                 # 간단한 차트
                 if HAS_PLOTLY:
-                    st.subheader("원가 분석 차트")
+                    st.subheader("📊 원가 분석 차트")
                     create_simple_chart(calculated_items)
             
             else:
-                st.warning("완제품 데이터가 없습니다.")
+                st.warning("⚠️ 완제품 데이터가 없습니다.")
             
             # 계산 실패 항목
             failed_items = finished_goods[finished_goods['계산상태'] == '계산불가']
             if not failed_items.empty:
-                with st.expander(f"계산 실패 {len(failed_items):,}개 항목"):
+                with st.expander(f"⚠️ 계산 실패 {len(failed_items):,}개 항목"):
                     st.dataframe(failed_items[['생산품목코드', '생산품목명']], use_container_width=True)
             
             # 결과 다운로드
-            st.header("5. 결과 다운로드")
+            st.header("5. 📥 결과 다운로드")
             
             excel_data = export_to_excel(finished_goods, result_df, details_df)
             
             if excel_data:
                 st.download_button(
-                    label="BOM 원가 계산 결과 다운로드 (Excel)",
+                    label="📊 BOM 원가 계산 결과 다운로드 (Excel)",
                     data=excel_data,
                     file_name=f'BOM원가계산_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -1363,59 +867,41 @@ def main():
                 # CSV 대안
                 csv_data = finished_goods.to_csv(index=False, encoding='utf-8-sig')
                 st.download_button(
-                    label="완제품 원가 결과 다운로드 (CSV)",
+                    label="📄 완제품 원가 결과 다운로드 (CSV)",
                     data=csv_data,
                     file_name=f'BOM원가계산_{datetime.now().strftime("%Y%m%d_%H%M")}.csv',
                     mime='text/csv',
                     use_container_width=True
                 )
             
-            st.success("BOM 원가 계산 완료!")
+            st.balloons()
+            st.success("🎉 BOM 원가 계산 완료!")
     
     else:
-        st.info("BOM 데이터(SharePoint)와 구매 데이터(업로드)를 모두 준비해주세요.")
-        
-        # 안내 메시지
-        if bom_df is None:
-            st.warning("🔗 SharePoint BOM 데이터 로딩을 기다리고 있습니다...")
-        
-        if purchase_df is None:
-            st.warning("📁 구매 데이터 파일을 업로드해주세요.")
+        st.info("👆 BOM 데이터와 구매 데이터 파일을 모두 업로드해주세요.")
         
         # 간단한 사용법
-        with st.expander("사용법", expanded=True):
+        with st.expander("📖 사용법", expanded=True):
             st.markdown("""
-            ### 📊 데이터 소스 구성
-            
-            **1. BOM 데이터 (SharePoint 자동 연결):**
-            - 고래미 SharePoint의 최신 BOM 데이터를 자동으로 가져옵니다
-            - 링크가 미리 설정되어 있어 별도 입력 불필요
-            - 실시간으로 최신 데이터 반영
-            
-            **2. 구매 데이터 (파일 업로드):**
-            - 로컬 컴퓨터의 Excel/CSV 파일을 업로드
-            - 파일 크기 제한: 100MB
-            - 헤더 문제 자동 해결
-            
             ### 📋 필수 데이터 형식
             
-            **BOM 데이터 (SharePoint - 필수 컬럼):**
+            **BOM 데이터 (필수 컬럼):**
             - `생산품목코드`: 생산할 제품 코드
             - `생산품목명`: 제품명 (완제품은 '[완제품]' 포함)
             - `소모품목코드`: 필요한 부품 코드
             - `소모품목명`: 부품명
             - `소요량`: 필요 수량 (숫자)
             
-            **구매 데이터 (업로드 - 자동 감지):**
+            **구매 데이터 (자동 감지):**
             - 일자 관련 컬럼 (일자-No. 등)
             - 품목코드 컬럼
             - 단가 컬럼
             
             ### ⚡ 주요 특징
-            - **SharePoint 연동**: BOM 데이터 실시간 업데이트
-            - **하이브리드 방식**: SharePoint + 파일 업로드 조합
-            - **실패 원인 분석**: 계산 안되는 품목의 구체적 이유 제공
-            - **Excel 자동 포맷팅**: 컬럼 너비, 색상 등 자동 조정
+            - 🎯 **핵심 기능 집중**: 필수 기능만으로 경량화
+            - 🛡️ **안정성 강화**: 오류 방지 및 안전한 처리
+            - 🔄 **다단계 BOM**: 중간재 포함 복잡한 구조 지원
+            - 📊 **실시간 피드백**: 진행률 및 상태 표시
             """)
 
 if __name__ == "__main__":
