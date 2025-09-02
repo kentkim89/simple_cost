@@ -1,9 +1,5 @@
-col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("전체 완제품", f"{total:,}개")
-            with col2:
-                st.metric"""
-BOM 원가 계산기 - 경량화 안정성 버전
+"""
+BOM 원가 계산기 - 경량 안정성 버전 + SharePoint 연동
 핵심 기능만 유지하며 안정성을 확보한 경량 버전
 """
 
@@ -49,11 +45,100 @@ def validate_file_size(file_obj, max_mb: int = 100) -> bool:
     try:
         size_mb = len(file_obj.getvalue()) / (1024 * 1024)
         if size_mb > max_mb:
-            st.error(f"❌ 파일이 너무 큽니다: {size_mb:.1f}MB > {max_mb}MB")
+            st.error(f"파일이 너무 큽니다: {size_mb:.1f}MB > {max_mb}MB")
             return False
         return True
     except Exception:
         return False
+
+def load_from_sharepoint_url(url: str, file_type: str = "unknown") -> Optional[pd.DataFrame]:
+    """SharePoint 직접 링크로 파일 로딩"""
+    try:
+        if not url or not url.strip():
+            return None
+            
+        url = url.strip()
+        
+        # SharePoint URL 형식 확인 및 변환
+        if 'sharepoint.com' in url:
+            # 공유 링크 형태 변환 (예: https://company.sharepoint.com/:x:/s/site/...)
+            if '/:x:/' in url or '/:b:/' in url or '/:w:/' in url:
+                # 공유 링크를 다운로드 링크로 변환
+                if '?e=' in url:
+                    base_url = url.split('?e=')[0]
+                    download_url = base_url + '?download=1'
+                else:
+                    download_url = url + ('&' if '?' in url else '?') + 'download=1'
+            
+            # Excel Online 링크 변환
+            elif '?web=1' in url:
+                download_url = url.replace('?web=1', '?download=1')
+            
+            # 일반 SharePoint 문서 링크
+            elif '/Documents/' in url or '/Shared%20Documents/' in url:
+                download_url = url + ('&' if '?' in url else '?') + 'download=1'
+            
+            # 기타 SharePoint 링크
+            else:
+                download_url = url + ('&' if '?' in url else '?') + 'download=1'
+        else:
+            download_url = url
+        
+        st.info(f"SharePoint 링크 처리 중: {file_type} 데이터")
+        
+        # 파일 다운로드 및 로딩
+        skiprows = 1 if file_type == "bom" else 0
+        
+        # 요청 헤더 추가 (SharePoint 호환성 향상)
+        if not HAS_REQUESTS:
+            st.error("requests 라이브러리가 필요합니다. 'pip install requests' 실행 후 다시 시도하세요.")
+            return None
+            
+        import requests
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        # requests를 사용하여 파일 다운로드
+        response = requests.get(download_url, headers=headers, allow_redirects=True)
+        response.raise_for_status()
+        
+        # 바이트 데이터를 pandas로 읽기
+        file_content = io.BytesIO(response.content)
+        df = pd.read_excel(file_content, skiprows=skiprows, dtype=str, na_values=['', 'NULL', 'null', 'NaN', 'nan'])
+        
+        if df is not None and not df.empty:
+            # 데이터 정제
+            for col in df.select_dtypes(include=['object']).columns:
+                df[col] = df[col].astype(str).str.strip()
+            
+            # 빈 행/열 제거
+            df = df.dropna(how='all').dropna(axis=1, how='all')
+            
+            st.success(f"SharePoint 파일 로딩 성공: {len(df)}행 × {len(df.columns)}열")
+            return df
+        else:
+            st.error("파일이 비어있거나 읽을 수 없습니다.")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        st.error(f"SharePoint 파일 다운로드 실패: {e}")
+        st.write("**가능한 원인:**")
+        st.write("1. 파일 권한이 '조직 내 사용자' 이상으로 설정되지 않음")
+        st.write("2. SharePoint 링크가 만료되었거나 잘못됨")
+        st.write("3. 네트워크 연결 문제")
+        st.write("**해결 방법:**")
+        st.write("- SharePoint에서 파일 다시 공유하여 새 링크 생성")
+        st.write("- '조직 내 모든 사용자가 액세스 가능' 권한으로 설정")
+        return None
+        
+    except Exception as e:
+        st.error(f"파일 처리 중 오류 발생: {e}")
+        st.write("**해결 방법:**")
+        st.write("1. Excel 파일 형식 확인 (.xlsx 또는 .xls)")
+        st.write("2. 파일이 손상되지 않았는지 확인")
+        st.write("3. 파일 업로드 방식으로 대신 시도")
+        return None
 
 def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Optional[pd.DataFrame]:
     """안전한 파일 로딩"""
@@ -95,89 +180,6 @@ def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Op
         
     except Exception as e:
         st.error(f"파일 로딩 실패: {e}")
-        return None
-    """SharePoint 직접 링크로 파일 로딩"""
-    try:
-        if not url or not url.strip():
-            return None
-            
-        url = url.strip()
-        
-        # SharePoint URL 형식 확인 및 변환
-        if 'sharepoint.com' in url:
-            # Excel Online 링크를 직접 다운로드 링크로 변환
-            if '?web=1' in url:
-                download_url = url.replace('?web=1', '?download=1')
-            elif '?e=' in url:
-                # 공유 링크 형태인 경우
-                download_url = url.split('?')[0] + '?download=1'
-            else:
-                download_url = url + ('&' if '?' in url else '?') + 'download=1'
-        else:
-            download_url = url
-        
-        # 파일 다운로드 및 로딩
-        skiprows = 1 if file_type == "bom" else 0
-        df = pd.read_excel(download_url, dtype=str, na_values=['', 'NULL', 'null', 'NaN', 'nan'])
-        
-        if df is not None and not df.empty:
-            # 데이터 정제
-            for col in df.select_dtypes(include=['object']).columns:
-                df[col] = df[col].astype(str).str.strip()
-            
-            # 빈 행/열 제거
-            df = df.dropna(how='all').dropna(axis=1, how='all')
-            
-            return df
-        else:
-            return None
-            
-    except Exception as e:
-        st.error(f"SharePoint 파일 로딩 실패: {e}")
-        st.write("**해결 방법:**")
-        st.write("1. SharePoint에서 파일 우클릭 → '링크 복사' → '조직 내 사용자가 편집 가능'")
-        st.write("2. 파일 권한이 '조직 내 모든 사용자' 이상으로 설정되어 있는지 확인")
-        st.write("3. URL이 완전한 SharePoint 링크인지 확인")
-        return None
-    """안전한 파일 로딩"""
-    try:
-        file_obj = io.BytesIO(file_content)
-        
-        # 파일 형식별 로딩
-        if file_name.lower().endswith('.csv'):
-            # CSV 인코딩 시도
-            for encoding in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr']:
-                try:
-                    file_obj.seek(0)
-                    df = pd.read_csv(file_obj, skiprows=skiprows, encoding=encoding, dtype=str)
-                    break
-                except:
-                    continue
-            else:
-                st.error("❌ CSV 파일 인코딩을 감지할 수 없습니다")
-                return None
-                
-        elif file_name.lower().endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(file_obj, skiprows=skiprows, dtype=str)
-        else:
-            st.error("❌ 지원하지 않는 파일 형식")
-            return None
-        
-        # 헤더 문제 해결 (구매 데이터용)
-        if 'purchase' in file_name.lower() or any('Unnamed:' in str(col) for col in df.columns):
-            df = fix_purchase_data_headers(df)
-        
-        # 데이터 정제
-        for col in df.select_dtypes(include=['object']).columns:
-            df[col] = df[col].astype(str).str.strip()
-        
-        # 빈 행/열 제거
-        df = df.dropna(how='all').dropna(axis=1, how='all')
-        
-        return df if not df.empty else None
-        
-    except Exception as e:
-        st.error(f"❌ 파일 로딩 실패: {e}")
         return None
 
 def fix_purchase_data_headers(df: pd.DataFrame) -> pd.DataFrame:
@@ -359,7 +361,7 @@ def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
         # 필수 컬럼 확인
         missing_cols = [col for col in Config.REQUIRED_BOM_COLS if col not in clean_df.columns]
         if missing_cols:
-            st.error(f"❌ 필수 컬럼 누락: {missing_cols}")
+            st.error(f"필수 컬럼 누락: {missing_cols}")
             return pd.DataFrame()
         
         # 데이터 정제 - 검증 전에 타입 변환
@@ -389,7 +391,7 @@ def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
         return clean_df
         
     except Exception as e:
-        st.error(f"❌ BOM 데이터 정제 오류: {e}")
+        st.error(f"BOM 데이터 정제 오류: {e}")
         return pd.DataFrame()
 
 def calculate_product_cost_with_reason(product_code: str, bom_df: pd.DataFrame, all_costs: Dict[str, float], cache: Dict[str, float]) -> Tuple[float, str]:
@@ -536,7 +538,7 @@ def calculate_all_bom_costs(bom_df: pd.DataFrame, purchase_prices: Dict[str, flo
         return result_df, details_df
         
     except Exception as e:
-        st.error(f"❌ BOM 원가 계산 실패: {e}")
+        st.error(f"BOM 원가 계산 실패: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 def create_simple_chart(df: pd.DataFrame) -> None:
@@ -722,7 +724,7 @@ def export_to_excel(finished_goods: pd.DataFrame, all_results: pd.DataFrame, det
         return output.getvalue()
         
     except Exception as e:
-        st.error(f"❌ 엑셀 생성 오류: {e}")
+        st.error(f"엑셀 생성 오류: {e}")
         return b''
 
 def main():
