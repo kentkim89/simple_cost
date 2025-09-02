@@ -45,40 +45,34 @@ def load_sharepoint_file():
         if not token:
             return None
         
-        # Graph API URL 구성
-        site_name = st.secrets["sharepoint_files"]["site_name"]
-        file_name = st.secrets["sharepoint_files"]["file_name"]
-        
-        # SharePoint 파일 URL
-        graph_url = f"https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/{site_name}:/drive/root:/{file_name}:/content"
-        
         headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/json'
         }
         
-        st.info("SharePoint에서 파일 다운로드 중...")
-        response = requests.get(graph_url, headers=headers)
+        # 여러 Graph API URL 시도
+        urls_to_try = [
+            # 방법 1: 사이트 이름으로 접근
+            "https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/data:/drive/root/children",
+            
+            # 방법 2: 사이트 검색
+            "https://graph.microsoft.com/v1.0/sites?search=data"
+        ]
         
-        if response.status_code == 200:
-            # Excel 파일 읽기
-            file_content = io.BytesIO(response.content)
-            df = pd.read_excel(file_content, skiprows=1, dtype=str)
-            
-            # 데이터 정제
-            for col in df.select_dtypes(include=['object']).columns:
-                df[col] = df[col].astype(str).str.strip()
-            
-            df = df.dropna(how='all').dropna(axis=1, how='all')
-            
-            st.success(f"파일 다운로드 성공: {len(df)}행")
-            return df
-            
+        st.info("SharePoint 사이트 정보 조회 중...")
+        
+        # 먼저 사이트 정보 확인
+        for url in urls_to_try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                st.success("사이트 접근 성공!")
+                st.json(response.json())  # 디버깅용
+                break
         else:
-            st.error(f"파일 다운로드 실패: {response.status_code}")
-            
-            # 대안: 직접 URL 시도
+            st.error("사이트 접근 실패 - 직접 URL 시도")
             return load_direct_url()
+        
+        return None  # 일단 사이트 정보만 확인
             
     except Exception as e:
         st.error(f"파일 로드 오류: {e}")
@@ -99,21 +93,30 @@ def load_direct_url():
         response = requests.get(download_url, headers=headers, timeout=30)
         
         if response.status_code == 200:
+            # 응답 내용 확인 (디버깅)
+            content_type = response.headers.get('content-type', '').lower()
+            st.info(f"응답 타입: {content_type}")
+            
+            # HTML 응답인지 확인
+            if 'html' in content_type or response.text.startswith('<!DOCTYPE'):
+                st.error("HTML 응답 - 로그인이 필요하거나 권한 문제")
+                st.text("응답 내용 일부:")
+                st.code(response.text[:500])
+                return None
+            
             file_content = io.BytesIO(response.content)
             
-            # Excel 엔진 명시적으로 지정
+            # Excel 파일로 시도
             try:
                 df = pd.read_excel(file_content, skiprows=1, dtype=str, engine='openpyxl')
-            except:
-                # 다른 엔진으로 재시도
+                st.success("Excel 파일로 읽기 성공")
+            except Exception as e1:
+                st.warning(f"Excel 읽기 실패: {e1}")
+                # 파일 내용 확인
                 file_content.seek(0)
-                try:
-                    df = pd.read_excel(file_content, skiprows=1, dtype=str, engine='xlrd')
-                except:
-                    # CSV로 시도
-                    file_content.seek(0)
-                    content_str = file_content.getvalue().decode('utf-8')
-                    df = pd.read_csv(io.StringIO(content_str), skiprows=1, dtype=str)
+                first_bytes = file_content.read(100)
+                st.text(f"파일 시작 부분: {first_bytes}")
+                return None
             
             # 데이터 정제
             for col in df.select_dtypes(include=['object']).columns:
@@ -125,6 +128,8 @@ def load_direct_url():
             return df
         else:
             st.error(f"직접 URL 접근 실패: {response.status_code}")
+            if response.status_code == 403:
+                st.error("접근 권한이 없습니다. SharePoint 링크 권한을 확인하세요.")
             return None
             
     except Exception as e:
