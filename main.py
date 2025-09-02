@@ -1,4 +1,8 @@
-"""
+col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("전체 완제품", f"{total:,}개")
+            with col2:
+                st.metric"""
 BOM 원가 계산기 - 경량화 안정성 버전
 핵심 기능만 유지하며 안정성을 확보한 경량 버전
 """
@@ -28,6 +32,12 @@ try:
 except ImportError:
     HAS_PLOTLY = False
 
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
 class Config:
     """설정 클래스"""
     MAX_FILE_SIZE_MB = 100
@@ -46,6 +56,89 @@ def validate_file_size(file_obj, max_mb: int = 100) -> bool:
         return False
 
 def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Optional[pd.DataFrame]:
+    """안전한 파일 로딩"""
+    try:
+        file_obj = io.BytesIO(file_content)
+        
+        # 파일 형식별 로딩
+        if file_name.lower().endswith('.csv'):
+            # CSV 인코딩 시도
+            for encoding in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr']:
+                try:
+                    file_obj.seek(0)
+                    df = pd.read_csv(file_obj, skiprows=skiprows, encoding=encoding, dtype=str)
+                    break
+                except:
+                    continue
+            else:
+                st.error("CSV 파일 인코딩을 감지할 수 없습니다")
+                return None
+                
+        elif file_name.lower().endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(file_obj, skiprows=skiprows, dtype=str)
+        else:
+            st.error("지원하지 않는 파일 형식")
+            return None
+        
+        # 헤더 문제 해결 (구매 데이터용)
+        if 'purchase' in file_name.lower() or any('Unnamed:' in str(col) for col in df.columns):
+            df = fix_purchase_data_headers(df)
+        
+        # 데이터 정제
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].astype(str).str.strip()
+        
+        # 빈 행/열 제거
+        df = df.dropna(how='all').dropna(axis=1, how='all')
+        
+        return df if not df.empty else None
+        
+    except Exception as e:
+        st.error(f"파일 로딩 실패: {e}")
+        return None
+    """SharePoint 직접 링크로 파일 로딩"""
+    try:
+        if not url or not url.strip():
+            return None
+            
+        url = url.strip()
+        
+        # SharePoint URL 형식 확인 및 변환
+        if 'sharepoint.com' in url:
+            # Excel Online 링크를 직접 다운로드 링크로 변환
+            if '?web=1' in url:
+                download_url = url.replace('?web=1', '?download=1')
+            elif '?e=' in url:
+                # 공유 링크 형태인 경우
+                download_url = url.split('?')[0] + '?download=1'
+            else:
+                download_url = url + ('&' if '?' in url else '?') + 'download=1'
+        else:
+            download_url = url
+        
+        # 파일 다운로드 및 로딩
+        skiprows = 1 if file_type == "bom" else 0
+        df = pd.read_excel(download_url, dtype=str, na_values=['', 'NULL', 'null', 'NaN', 'nan'])
+        
+        if df is not None and not df.empty:
+            # 데이터 정제
+            for col in df.select_dtypes(include=['object']).columns:
+                df[col] = df[col].astype(str).str.strip()
+            
+            # 빈 행/열 제거
+            df = df.dropna(how='all').dropna(axis=1, how='all')
+            
+            return df
+        else:
+            return None
+            
+    except Exception as e:
+        st.error(f"SharePoint 파일 로딩 실패: {e}")
+        st.write("**해결 방법:**")
+        st.write("1. SharePoint에서 파일 우클릭 → '링크 복사' → '조직 내 사용자가 편집 가능'")
+        st.write("2. 파일 권한이 '조직 내 모든 사용자' 이상으로 설정되어 있는지 확인")
+        st.write("3. URL이 완전한 SharePoint 링크인지 확인")
+        return None
     """안전한 파일 로딩"""
     try:
         file_obj = io.BytesIO(file_content)
@@ -90,8 +183,6 @@ def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Op
 def fix_purchase_data_headers(df: pd.DataFrame) -> pd.DataFrame:
     """구매 데이터 헤더 문제 해결"""
     try:
-        st.info("🔧 구매 데이터 헤더 문제를 감지했습니다. 자동으로 수정합니다...")
-        
         # 첫 번째 행에서 실제 헤더 찾기
         potential_headers = None
         
@@ -107,7 +198,6 @@ def fix_purchase_data_headers(df: pd.DataFrame) -> pd.DataFrame:
             if keyword_count >= 3:  # 3개 이상의 키워드가 있으면 헤더로 판단
                 potential_headers = row_values
                 header_row_idx = i
-                st.info(f"📋 {i}행에서 실제 헤더를 발견했습니다: {keyword_count}개 키워드 매칭")
                 break
         
         if potential_headers:
@@ -130,17 +220,13 @@ def fix_purchase_data_headers(df: pd.DataFrame) -> pd.DataFrame:
             # 빈 행 제거
             new_df = new_df.dropna(how='all')
             
-            st.success(f"✅ 헤더 수정 완료: {len(cleaned_headers)}개 컬럼, {len(new_df)}행 데이터")
-            st.write("**수정된 헤더:**", cleaned_headers[:10])  # 처음 10개만 표시
-            
             return new_df
         
         else:
-            st.warning("⚠️ 적절한 헤더를 찾을 수 없습니다. 원본 데이터를 사용합니다.")
             return df
         
     except Exception as e:
-        st.error(f"❌ 헤더 수정 중 오류: {e}")
+        st.error(f"헤더 수정 중 오류: {e}")
         return df
 
 def validate_bom_data(df: pd.DataFrame) -> Tuple[bool, str]:
@@ -161,48 +247,39 @@ def validate_bom_data(df: pd.DataFrame) -> Tuple[bool, str]:
         return False, f"검증 오류: {e}"
 
 def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
-    """구매 데이터에서 단가 추출 (헤더 문제 해결 포함)"""
+    """구매 데이터에서 단가 추출"""
     try:
         if df.empty:
             return {}
         
-        st.write("📊 **구매 데이터 분석 중...**")
-        st.write(f"- 원본 컬럼: {list(df.columns)[:5]}...")  # 처음 5개만 표시
-        
-        # 컬럼 자동 감지 (개선된 버전)
+        # 컬럼 자동 감지
         date_col, item_col, price_col = None, None, None
         
         # 각 컬럼명을 분석하여 매칭
         for col in df.columns:
             col_str = str(col).lower()
-            col_original = str(col)
             
             # 일자 컬럼 감지
             if not date_col:
                 if any(keyword in col_str for keyword in ['일자', 'date', '날짜']) or '일자-no' in col_str:
                     date_col = col
-                    st.info(f"📅 일자 컬럼 발견: '{col_original}'")
             
             # 품목코드 컬럼 감지  
             if not item_col:
                 if '품목코드' in col_str:
                     item_col = col
-                    st.info(f"🔖 품목코드 컬럼 발견: '{col_original}'")
             
             # 단가 컬럼 감지
             if not price_col:
                 if '단가' in col_str and '공급' not in col_str and '총' not in col_str:
                     price_col = col
-                    st.info(f"💰 단가 컬럼 발견: '{col_original}'")
         
         # 컬럼을 찾지 못한 경우 인덱스로 대체
         if not date_col and len(df.columns) > 0:
             date_col = df.columns[0]
-            st.warning(f"⚠️ 일자 컬럼을 자동 설정: '{date_col}'")
             
         if not item_col and len(df.columns) > 1:
             item_col = df.columns[1]
-            st.warning(f"⚠️ 품목코드 컬럼을 자동 설정: '{item_col}'")
             
         if not price_col:
             # 단가 관련 컬럼 우선 탐색
@@ -213,7 +290,6 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
                     try:
                         float(sample_value.replace(',', ''))
                         price_col = col
-                        st.warning(f"⚠️ 단가 컬럼을 추정 설정: '{col}' (샘플값: {sample_value})")
                         break
                     except:
                         continue
@@ -221,13 +297,10 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
             # 그래도 없으면 기본값
             if not price_col and len(df.columns) > 5:
                 price_col = df.columns[5]
-                st.warning(f"⚠️ 단가 컬럼을 기본 설정: '{price_col}'")
         
         if not all([date_col, item_col, price_col]):
-            st.error(f"❌ 필수 컬럼을 찾을 수 없습니다. 일자: {date_col}, 품목코드: {item_col}, 단가: {price_col}")
+            st.error(f"필수 컬럼을 찾을 수 없습니다.")
             return {}
-        
-        st.success(f"✅ 컬럼 매핑 완료 - 일자: {date_col}, 품목코드: {item_col}, 단가: {price_col}")
         
         # 데이터 정제
         work_df = df[[date_col, item_col, price_col]].copy()
@@ -249,18 +322,17 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
         ]
         
         if work_df.empty:
-            st.error("❌ 유효한 구매 데이터가 없습니다.")
+            st.error("유효한 구매 데이터가 없습니다.")
             return {}
         
-        # 날짜 처리 (간단하게)
+        # 날짜 처리
         try:
             work_df['date_str'] = work_df['date'].astype(str).str.split('-').str[0]
             work_df['date_parsed'] = pd.to_datetime(work_df['date_str'], errors='coerce')
             work_df = work_df.dropna(subset=['date_parsed'])
             work_df = work_df.sort_values('date_parsed', ascending=False)
-            st.info("📅 날짜순 정렬 완료")
         except:
-            st.warning("⚠️ 날짜 정렬 실패, 원본 순서 유지")
+            pass  # 날짜 정렬 실패해도 계속 진행
         
         # 최신 단가 추출
         latest_prices = work_df.drop_duplicates(subset='item_code', keep='first')
@@ -273,15 +345,10 @@ def extract_purchase_prices(df: pd.DataFrame) -> Dict[str, float]:
             if pd.notna(price) and price > 0:
                 price_dict[code] = float(price)
         
-        st.write(f"**구매단가 샘플 (처음 5개):**")
-        sample_items = list(price_dict.items())[:5]
-        for code, price in sample_items:
-            st.write(f"  • {code}: {price:,.0f}원")
-        
         return price_dict
         
     except Exception as e:
-        st.error(f"❌ 구매 단가 추출 오류: {e}")
+        st.error(f"구매 단가 추출 오류: {e}")
         return {}
 
 def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -308,7 +375,7 @@ def clean_bom_data(df: pd.DataFrame) -> pd.DataFrame:
         after_count = len(clean_df)
         
         if before_count != after_count:
-            st.info(f"🧹 test 품목 제거: {before_count:,} → {after_count:,}행")
+            st.info(f"test 품목 제거: {before_count:,} → {after_count:,}행")
         
         # 유효하지 않은 데이터 제거
         clean_df = clean_df[
@@ -412,7 +479,7 @@ def calculate_all_bom_costs(bom_df: pd.DataFrame, purchase_prices: Dict[str, flo
         # 모든 생산품목
         all_products = clean_bom[['생산품목코드', '생산품목명']].drop_duplicates().reset_index(drop=True)
         
-        st.info(f"📊 계산 대상: 생산품목 {len(all_products):,}개, 구매단가 {len(purchase_prices):,}개")
+        st.info(f"계산 대상: 생산품목 {len(all_products):,}개, 구매단가 {len(purchase_prices):,}개")
         
         # 전체 원가 딕셔너리
         all_costs = purchase_prices.copy()
@@ -464,7 +531,7 @@ def calculate_all_bom_costs(bom_df: pd.DataFrame, purchase_prices: Dict[str, flo
         details_df['부품별원가'] = details_df['소요량'] * details_df['부품단가']
         
         elapsed = time.time() - start_time
-        st.success(f"✅ 계산 완료! (소요시간: {elapsed:.1f}초)")
+        st.success(f"계산 완료! (소요시간: {elapsed:.1f}초)")
         
         return result_df, details_df
         
@@ -667,84 +734,146 @@ def main():
         layout="wide"
     )
     
-    st.title("🏭 BOM 원가 계산기 (경량 안정성 버전)")
-    st.markdown("**✨ 핵심 기능에 집중한 안정적이고 가벼운 버전**")
+    st.title("BOM 원가 계산기")
+    st.markdown("**핵심 기능에 집중한 안정적이고 가벼운 버전**")
     
     # 기능 상태 표시
     with st.sidebar:
-        st.header("📊 시스템 상태")
+        st.header("시스템 상태")
         st.info(f"""
         **활성화된 기능:**
-        - 진행률 표시: {'✅' if HAS_PROGRESS else '❌'}
-        - 시각화: {'✅' if HAS_PLOTLY else '❌'}
+        - 진행률 표시: {'사용가능' if HAS_PROGRESS else '미사용'}
+        - 시각화: {'사용가능' if HAS_PLOTLY else '미사용'}
+        - SharePoint 연동: {'사용가능' if HAS_REQUESTS else '미사용'}
         """)
     
     # 파일 업로드
-    st.header("1. 📁 파일 업로드")
+    st.header("1. 데이터 소스 선택")
     
-    col1, col2 = st.columns(2)
+    # 데이터 소스 방식 선택
+    data_source = st.radio(
+        "데이터를 가져오는 방법을 선택하세요",
+        ["파일 업로드", "SharePoint 링크"],
+        horizontal=True
+    )
     
-    with col1:
-        bom_file = st.file_uploader("📋 BOM 데이터 파일", type=['csv', 'xlsx', 'xls'], key="bom")
-        
-    with col2:
-        purchase_file = st.file_uploader("💰 구매 데이터 파일", type=['csv', 'xlsx', 'xls'], key="purchase")
+    bom_df, purchase_df = None, None
     
-    if bom_file and purchase_file:
+    if data_source == "파일 업로드":
+        # 기존 파일 업로드 방식
+        col1, col2 = st.columns(2)
         
-        # 파일 크기 확인
-        if not validate_file_size(bom_file) or not validate_file_size(purchase_file):
-            st.stop()
+        with col1:
+            st.subheader("BOM 데이터")
+            bom_file = st.file_uploader("BOM 데이터 파일", type=['csv', 'xlsx', 'xls'], key="bom")
+            if bom_file:
+                if validate_file_size(bom_file):
+                    bom_df = safe_load_data(bom_file.getvalue(), bom_file.name, skiprows=1)
+                    
+        with col2:
+            st.subheader("구매 데이터")
+            purchase_file = st.file_uploader("구매 데이터 파일", type=['csv', 'xlsx', 'xls'], key="purchase")
+            if purchase_file:
+                if validate_file_size(purchase_file):
+                    purchase_df = safe_load_data(purchase_file.getvalue(), purchase_file.name)
+    
+    else:  # SharePoint 링크 방식
+        st.subheader("SharePoint 파일 링크")
         
-        # 파일 로딩
-        with st.spinner("📖 파일 로딩 중..."):
-            bom_df = safe_load_data(bom_file.getvalue(), bom_file.name, skiprows=1)
-            purchase_df = safe_load_data(purchase_file.getvalue(), purchase_file.name)
-        
-        if bom_df is None or purchase_df is None:
-            st.stop()
-        
-        # 간단한 검증
-        bom_valid, bom_msg = validate_bom_data(bom_df)
-        if not bom_valid:
-            st.error(f"❌ BOM 데이터 오류: {bom_msg}")
-            st.stop()
-        
-        # 데이터 미리보기
-        st.header("2. 📋 데이터 미리보기")
+        # SharePoint 사용법 안내
+        with st.expander("SharePoint 링크 사용법", expanded=False):
+            st.markdown("""
+            **SharePoint 파일 링크 복사 방법:**
+            1. SharePoint에서 Excel 파일 우클릭
+            2. '링크 복사' 또는 '공유' 클릭
+            3. '조직 내 사용자가 편집 가능' 또는 '조직 내 모든 사용자' 선택
+            4. 링크 복사하여 아래 입력란에 붙여넣기
+            
+            **지원되는 링크 형태:**
+            - `https://company.sharepoint.com/sites/.../Documents/file.xlsx`
+            - `https://company.sharepoint.com/:x:/s/.../?e=xxxxx` (공유 링크)
+            """)
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("📋 BOM 데이터")
-            st.info(f"📊 {len(bom_df):,}행 × {len(bom_df.columns)}열")
+            st.subheader("BOM 데이터")
+            bom_url = st.text_input(
+                "BOM 데이터 SharePoint 링크",
+                placeholder="https://company.sharepoint.com/.../BOM.xlsx",
+                key="bom_url"
+            )
+            
+            if bom_url:
+                with st.spinner("SharePoint에서 BOM 데이터 로딩 중..."):
+                    bom_df = load_from_sharepoint_url(bom_url, "bom")
+                    if bom_df is not None:
+                        st.success(f"BOM 데이터 로드 완료: {len(bom_df):,}행")
+                    else:
+                        st.error("BOM 데이터 로딩 실패")
+        
+        with col2:
+            st.subheader("구매 데이터")
+            purchase_url = st.text_input(
+                "구매 데이터 SharePoint 링크", 
+                placeholder="https://company.sharepoint.com/.../구매데이터.xlsx",
+                key="purchase_url"
+            )
+            
+            if purchase_url:
+                with st.spinner("SharePoint에서 구매 데이터 로딩 중..."):
+                    purchase_df = load_from_sharepoint_url(purchase_url, "purchase")
+                    if purchase_df is not None:
+                        st.success(f"구매 데이터 로드 완료: {len(purchase_df):,}행")
+                        # 헤더 문제 해결
+                        if any('Unnamed:' in str(col) for col in purchase_df.columns):
+                            purchase_df = fix_purchase_data_headers(purchase_df)
+                    else:
+                        st.error("구매 데이터 로딩 실패")
+    
+    if (bom_df is not None and purchase_df is not None) or (data_source == "SharePoint 링크" and bom_df is not None and purchase_df is not None):
+        
+        # 간단한 검증
+        bom_valid, bom_msg = validate_bom_data(bom_df)
+        if not bom_valid:
+            st.error(f"BOM 데이터 오류: {bom_msg}")
+            st.stop()
+        
+        # 데이터 미리보기
+        st.header("2. 데이터 미리보기")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("BOM 데이터")
+            st.info(f"{len(bom_df):,}행 × {len(bom_df.columns)}열")
             st.dataframe(bom_df.head(3), use_container_width=True)
             
         with col2:
-            st.subheader("💰 구매 데이터")
-            st.info(f"📊 {len(purchase_df):,}행 × {len(purchase_df.columns)}열")
+            st.subheader("구매 데이터")
+            st.info(f"{len(purchase_df):,}행 × {len(purchase_df.columns)}열")
             st.dataframe(purchase_df.head(3), use_container_width=True)
         
         # 원가 계산
-        st.header("3. 🚀 BOM 원가 계산")
+        st.header("3. BOM 원가 계산")
         
-        if st.button("💪 원가 계산 시작!", type="primary", use_container_width=True):
+        if st.button("원가 계산 시작!", type="primary", use_container_width=True):
             
             # 구매 단가 추출
-            with st.spinner("💰 구매 단가 추출 중..."):
+            with st.spinner("구매 단가 추출 중..."):
                 purchase_prices = extract_purchase_prices(purchase_df)
             
             if not purchase_prices:
-                st.error("❌ 구매 단가를 추출할 수 없습니다.")
+                st.error("구매 단가를 추출할 수 없습니다.")
                 st.stop()
             
-            st.success(f"✅ 구매 단가 추출 완료: {len(purchase_prices):,}개 품목")
+            st.success(f"구매 단가 추출 완료: {len(purchase_prices):,}개 품목")
             
             # BOM 원가 계산
             result_df, details_df = calculate_all_bom_costs(bom_df, purchase_prices)
             
             if result_df.empty:
-                st.error("❌ BOM 원가 계산 실패")
+                st.error("BOM 원가 계산 실패")
                 st.stop()
             
             # 완제품 필터링
@@ -753,7 +882,7 @@ def main():
             ].copy()
             
             # 결과 표시
-            st.header("4. 🎯 완제품 원가 결과")
+            st.header("4. 완제품 원가 결과")
             
             # 통계
             total = len(finished_goods)
@@ -762,11 +891,11 @@ def main():
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("🎯 전체 완제품", f"{total:,}개")
+                st.metric("전체 완제품", f"{total:,}개")
             with col2:
-                st.metric("✅ 계산 성공", f"{calculated:,}개")
+                st.metric("계산 성공", f"{calculated:,}개")
             with col3:
-                st.metric("📊 성공률", f"{success_rate:.1f}%")
+                st.metric("성공률", f"{success_rate:.1f}%")
             
             # 결과 테이블
             if not finished_goods.empty:
@@ -794,7 +923,7 @@ def main():
                 # 실패 이유 분석 요약
                 failed_items = finished_goods[finished_goods['계산상태'] == '계산불가']
                 if not failed_items.empty and '실패이유' in failed_items.columns:
-                    st.subheader("⚠️ 계산 실패 원인 분석")
+                    st.subheader("계산 실패 원인 분석")
                     
                     # 실패 이유별 통계
                     failure_stats = {}
@@ -826,38 +955,38 @@ def main():
                     max_cost = calculated_items['계산된단위원가'].max()
                     min_cost = calculated_items[calculated_items['계산된단위원가'] > 0]['계산된단위원가'].min()
                     
-                    st.subheader("📈 원가 통계")
+                    st.subheader("원가 통계")
                     col1, col2, col3 = st.columns(3)
                     
                     with col1:
-                        st.metric("💰 평균 원가", f"{avg_cost:,.0f}원")
+                        st.metric("평균 원가", f"{avg_cost:,.0f}원")
                     with col2:
-                        st.metric("📈 최고 원가", f"{max_cost:,.0f}원")
+                        st.metric("최고 원가", f"{max_cost:,.0f}원")
                     with col3:
-                        st.metric("📉 최저 원가", f"{min_cost:,.0f}원")
+                        st.metric("최저 원가", f"{min_cost:,.0f}원")
                 
                 # 간단한 차트
                 if HAS_PLOTLY:
-                    st.subheader("📊 원가 분석 차트")
+                    st.subheader("원가 분석 차트")
                     create_simple_chart(calculated_items)
             
             else:
-                st.warning("⚠️ 완제품 데이터가 없습니다.")
+                st.warning("완제품 데이터가 없습니다.")
             
             # 계산 실패 항목
             failed_items = finished_goods[finished_goods['계산상태'] == '계산불가']
             if not failed_items.empty:
-                with st.expander(f"⚠️ 계산 실패 {len(failed_items):,}개 항목"):
+                with st.expander(f"계산 실패 {len(failed_items):,}개 항목"):
                     st.dataframe(failed_items[['생산품목코드', '생산품목명']], use_container_width=True)
             
             # 결과 다운로드
-            st.header("5. 📥 결과 다운로드")
+            st.header("5. 결과 다운로드")
             
             excel_data = export_to_excel(finished_goods, result_df, details_df)
             
             if excel_data:
                 st.download_button(
-                    label="📊 BOM 원가 계산 결과 다운로드 (Excel)",
+                    label="BOM 원가 계산 결과 다운로드 (Excel)",
                     data=excel_data,
                     file_name=f'BOM원가계산_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -867,23 +996,22 @@ def main():
                 # CSV 대안
                 csv_data = finished_goods.to_csv(index=False, encoding='utf-8-sig')
                 st.download_button(
-                    label="📄 완제품 원가 결과 다운로드 (CSV)",
+                    label="완제품 원가 결과 다운로드 (CSV)",
                     data=csv_data,
                     file_name=f'BOM원가계산_{datetime.now().strftime("%Y%m%d_%H%M")}.csv',
                     mime='text/csv',
                     use_container_width=True
                 )
             
-            st.balloons()
-            st.success("🎉 BOM 원가 계산 완료!")
+            st.success("BOM 원가 계산 완료!")
     
     else:
-        st.info("👆 BOM 데이터와 구매 데이터 파일을 모두 업로드해주세요.")
+        st.info("BOM 데이터와 구매 데이터를 모두 준비해주세요.")
         
         # 간단한 사용법
-        with st.expander("📖 사용법", expanded=True):
+        with st.expander("사용법", expanded=True):
             st.markdown("""
-            ### 📋 필수 데이터 형식
+            ### 필수 데이터 형식
             
             **BOM 데이터 (필수 컬럼):**
             - `생산품목코드`: 생산할 제품 코드
@@ -897,11 +1025,21 @@ def main():
             - 품목코드 컬럼
             - 단가 컬럼
             
-            ### ⚡ 주요 특징
-            - 🎯 **핵심 기능 집중**: 필수 기능만으로 경량화
-            - 🛡️ **안정성 강화**: 오류 방지 및 안전한 처리
-            - 🔄 **다단계 BOM**: 중간재 포함 복잡한 구조 지원
-            - 📊 **실시간 피드백**: 진행률 및 상태 표시
+            ### 데이터 가져오기 방법
+            
+            **1. 파일 업로드:**
+            - 로컬 컴퓨터의 Excel/CSV 파일 직접 업로드
+            - 파일 크기 제한: 100MB
+            
+            **2. SharePoint 링크:**
+            - SharePoint에 저장된 파일을 링크로 직접 연결
+            - 실시간으로 최신 데이터 사용 가능
+            - 파일 권한: '조직 내 사용자' 이상으로 설정 필요
+            
+            ### 주요 특징
+            - **다단계 BOM**: 중간재 포함 복잡한 구조 지원
+            - **실패 원인 분석**: 계산 안되는 품목의 구체적 이유 제공
+            - **Excel 자동 포맷팅**: 컬럼 너비, 색상 등 자동 조정
             """)
 
 if __name__ == "__main__":
