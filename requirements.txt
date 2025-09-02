@@ -2,6 +2,7 @@
 streamlit>=1.28.0
 pandas>=2.0.0
 numpy>=1.24.0
+requests>=2.31.0
 
 # === 파일 처리 (필수) ===
 openpyxl>=3.1.0          # Excel 파일 읽기/쓰기 및 스타일링
@@ -67,3 +68,6 @@ pathlib2>=2.3.7          # Python 3.8 미만에서 향상된 경로 처리
 # pytest>=7.4.0
 # pytest-cov>=4.1.0
 # pytest-mock>=3.11.0
+
+
+
