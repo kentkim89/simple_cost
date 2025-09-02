@@ -750,90 +750,54 @@ def main():
         """)
     
     # 파일 업로드
-    st.header("1. 데이터 소스 선택")
+    st.header("1. 데이터 소스")
     
-    # 데이터 소스 방식 선택
-    data_source = st.radio(
-        "데이터를 가져오는 방법을 선택하세요",
-        ["파일 업로드", "SharePoint 링크"],
-        horizontal=True
+    # SharePoint BOM 데이터 (고정)
+    st.subheader("BOM 데이터 (SharePoint)")
+    
+    # 기본 SharePoint 링크
+    default_bom_url = "https://goremi.sharepoint.com/:x:/s/data/EeSY2icSY1tMqngy6KJoP4MBbY_ynMyu0-4aC-8PHkEF_A?e=bfT3Xv"
+    
+    bom_url = st.text_input(
+        "BOM 데이터 SharePoint 링크",
+        value=default_bom_url,
+        help="기본값: 고래미 SharePoint BOM 데이터"
     )
     
-    bom_df, purchase_df = None, None
+    # SharePoint BOM 데이터 자동 로딩
+    bom_df = None
+    if bom_url:
+        with st.spinner("SharePoint에서 BOM 데이터 로딩 중..."):
+            bom_df = load_from_sharepoint_url(bom_url, "bom")
+            if bom_df is not None:
+                st.success(f"BOM 데이터 로드 완료: {len(bom_df):,}행 × {len(bom_df.columns)}열")
+            else:
+                st.error("BOM 데이터 로딩 실패")
     
-    if data_source == "파일 업로드":
-        # 기존 파일 업로드 방식
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("BOM 데이터")
-            bom_file = st.file_uploader("BOM 데이터 파일", type=['csv', 'xlsx', 'xls'], key="bom")
-            if bom_file:
-                if validate_file_size(bom_file):
-                    bom_df = safe_load_data(bom_file.getvalue(), bom_file.name, skiprows=1)
-                    
-        with col2:
-            st.subheader("구매 데이터")
-            purchase_file = st.file_uploader("구매 데이터 파일", type=['csv', 'xlsx', 'xls'], key="purchase")
-            if purchase_file:
-                if validate_file_size(purchase_file):
-                    purchase_df = safe_load_data(purchase_file.getvalue(), purchase_file.name)
+    # 구매 데이터 (파일 업로드)
+    st.subheader("구매 데이터 (파일 업로드)")
     
-    else:  # SharePoint 링크 방식
-        st.subheader("SharePoint 파일 링크")
-        
-        # SharePoint 사용법 안내
-        with st.expander("SharePoint 링크 사용법", expanded=False):
-            st.markdown("""
-            **SharePoint 파일 링크 복사 방법:**
-            1. SharePoint에서 Excel 파일 우클릭
-            2. '링크 복사' 또는 '공유' 클릭
-            3. '조직 내 사용자가 편집 가능' 또는 '조직 내 모든 사용자' 선택
-            4. 링크 복사하여 아래 입력란에 붙여넣기
-            
-            **지원되는 링크 형태:**
-            - `https://company.sharepoint.com/sites/.../Documents/file.xlsx`
-            - `https://company.sharepoint.com/:x:/s/.../?e=xxxxx` (공유 링크)
-            """)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("BOM 데이터")
-            bom_url = st.text_input(
-                "BOM 데이터 SharePoint 링크",
-                placeholder="https://company.sharepoint.com/.../BOM.xlsx",
-                key="bom_url"
-            )
-            
-            if bom_url:
-                with st.spinner("SharePoint에서 BOM 데이터 로딩 중..."):
-                    bom_df = load_from_sharepoint_url(bom_url, "bom")
-                    if bom_df is not None:
-                        st.success(f"BOM 데이터 로드 완료: {len(bom_df):,}행")
-                    else:
-                        st.error("BOM 데이터 로딩 실패")
-        
-        with col2:
-            st.subheader("구매 데이터")
-            purchase_url = st.text_input(
-                "구매 데이터 SharePoint 링크", 
-                placeholder="https://company.sharepoint.com/.../구매데이터.xlsx",
-                key="purchase_url"
-            )
-            
-            if purchase_url:
-                with st.spinner("SharePoint에서 구매 데이터 로딩 중..."):
-                    purchase_df = load_from_sharepoint_url(purchase_url, "purchase")
-                    if purchase_df is not None:
-                        st.success(f"구매 데이터 로드 완료: {len(purchase_df):,}행")
-                        # 헤더 문제 해결
-                        if any('Unnamed:' in str(col) for col in purchase_df.columns):
-                            purchase_df = fix_purchase_data_headers(purchase_df)
-                    else:
-                        st.error("구매 데이터 로딩 실패")
+    purchase_df = None
+    purchase_file = st.file_uploader(
+        "구매 데이터 파일을 업로드하세요", 
+        type=['csv', 'xlsx', 'xls'], 
+        key="purchase",
+        help="Excel 또는 CSV 파일 (최대 100MB)"
+    )
     
-    if (bom_df is not None and purchase_df is not None) or (data_source == "SharePoint 링크" and bom_df is not None and purchase_df is not None):
+    if purchase_file:
+        if validate_file_size(purchase_file):
+            with st.spinner("구매 데이터 파일 처리 중..."):
+                purchase_df = safe_load_data(purchase_file.getvalue(), purchase_file.name)
+                if purchase_df is not None:
+                    st.success(f"구매 데이터 로드 완료: {len(purchase_df):,}행 × {len(purchase_df.columns)}열")
+                    # 헤더 문제 해결
+                    if any('Unnamed:' in str(col) for col in purchase_df.columns):
+                        purchase_df = fix_purchase_data_headers(purchase_df)
+                else:
+                    st.error("구매 데이터 로딩 실패")
+    
+    if (bom_df is not None and purchase_df is not None):
         
         # 간단한 검증
         bom_valid, bom_msg = validate_bom_data(bom_df)
@@ -847,12 +811,12 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("BOM 데이터")
+            st.subheader("BOM 데이터 (SharePoint)")
             st.info(f"{len(bom_df):,}행 × {len(bom_df.columns)}열")
             st.dataframe(bom_df.head(3), use_container_width=True)
             
         with col2:
-            st.subheader("구매 데이터")
+            st.subheader("구매 데이터 (업로드)")
             st.info(f"{len(purchase_df):,}행 × {len(purchase_df.columns)}열")
             st.dataframe(purchase_df.head(3), use_container_width=True)
         
@@ -1008,38 +972,47 @@ def main():
             st.success("BOM 원가 계산 완료!")
     
     else:
-        st.info("BOM 데이터와 구매 데이터를 모두 준비해주세요.")
+        st.info("BOM 데이터(SharePoint)와 구매 데이터(업로드)를 모두 준비해주세요.")
+        
+        # 안내 메시지
+        if bom_df is None:
+            st.warning("🔗 SharePoint BOM 데이터 로딩을 기다리고 있습니다...")
+        
+        if purchase_df is None:
+            st.warning("📁 구매 데이터 파일을 업로드해주세요.")
         
         # 간단한 사용법
         with st.expander("사용법", expanded=True):
             st.markdown("""
-            ### 필수 데이터 형식
+            ### 📊 데이터 소스 구성
             
-            **BOM 데이터 (필수 컬럼):**
+            **1. BOM 데이터 (SharePoint 자동 연결):**
+            - 고래미 SharePoint의 최신 BOM 데이터를 자동으로 가져옵니다
+            - 링크가 미리 설정되어 있어 별도 입력 불필요
+            - 실시간으로 최신 데이터 반영
+            
+            **2. 구매 데이터 (파일 업로드):**
+            - 로컬 컴퓨터의 Excel/CSV 파일을 업로드
+            - 파일 크기 제한: 100MB
+            - 헤더 문제 자동 해결
+            
+            ### 📋 필수 데이터 형식
+            
+            **BOM 데이터 (SharePoint - 필수 컬럼):**
             - `생산품목코드`: 생산할 제품 코드
             - `생산품목명`: 제품명 (완제품은 '[완제품]' 포함)
             - `소모품목코드`: 필요한 부품 코드
             - `소모품목명`: 부품명
             - `소요량`: 필요 수량 (숫자)
             
-            **구매 데이터 (자동 감지):**
+            **구매 데이터 (업로드 - 자동 감지):**
             - 일자 관련 컬럼 (일자-No. 등)
             - 품목코드 컬럼
             - 단가 컬럼
             
-            ### 데이터 가져오기 방법
-            
-            **1. 파일 업로드:**
-            - 로컬 컴퓨터의 Excel/CSV 파일 직접 업로드
-            - 파일 크기 제한: 100MB
-            
-            **2. SharePoint 링크:**
-            - SharePoint에 저장된 파일을 링크로 직접 연결
-            - 실시간으로 최신 데이터 사용 가능
-            - 파일 권한: '조직 내 사용자' 이상으로 설정 필요
-            
-            ### 주요 특징
-            - **다단계 BOM**: 중간재 포함 복잡한 구조 지원
+            ### ⚡ 주요 특징
+            - **SharePoint 연동**: BOM 데이터 실시간 업데이트
+            - **하이브리드 방식**: SharePoint + 파일 업로드 조합
             - **실패 원인 분석**: 계산 안되는 품목의 구체적 이유 제공
             - **Excel 자동 포맷팅**: 컬럼 너비, 색상 등 자동 조정
             """)
