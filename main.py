@@ -1,12 +1,14 @@
 """
-BOM 원가 계산기 - 경량화 안정성 버전
-핵심 기능만 유지하며 안정성을 확보한 경량 버전
+BOM 원가 계산기 - SharePoint 연동 버전
+SharePoint에서 BOM 데이터를 자동으로 가져와서 계산하는 버전
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import requests
+import json
 from typing import Dict, Optional, Tuple
 from datetime import datetime
 import time
@@ -34,10 +36,185 @@ class Config:
     REQUIRED_BOM_COLS = ['생산품목코드', '생산품목명', '소모품목코드', '소모품목명', '소요량']
     TEST_ITEM_CODE = '99701'
 
-def validate_file_size(file_obj, max_mb: int = 100) -> bool:
+class SharePointClient:
+    """SharePoint 연동 클래스"""
+    
+    def __init__(self):
+        self.access_token = None
+        self.token_expires_at = 0
+        
+    def get_access_token(self) -> Optional[str]:
+        """Azure AD 토큰 획득"""
+        try:
+            # Streamlit secrets에서 설정 읽기
+            tenant_id = st.secrets["sharepoint"]["tenant_id"]
+            client_id = st.secrets["sharepoint"]["client_id"]
+            client_secret = st.secrets["sharepoint"]["client_secret"]
+            
+            # 토큰이 유효한지 확인 (5분 여유)
+            if self.access_token and time.time() < self.token_expires_at - 300:
+                return self.access_token
+            
+            # 새 토큰 요청
+            token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+            
+            token_data = {
+                'grant_type': 'client_credentials',
+                'client_id': client_id,
+                'client_secret': client_secret,
+                'scope': 'https://graph.microsoft.com/.default'
+            }
+            
+            response = requests.post(token_url, data=token_data)
+            response.raise_for_status()
+            
+            token_info = response.json()
+            self.access_token = token_info['access_token']
+            self.token_expires_at = time.time() + token_info.get('expires_in', 3600)
+            
+            st.success("🔑 SharePoint 인증 성공!")
+            return self.access_token
+            
+        except Exception as e:
+            st.error(f"❌ SharePoint 인증 실패: {e}")
+            return None
+    
+    def get_site_id(self, site_name: str) -> Optional[str]:
+        """사이트 ID 획득"""
+        try:
+            token = self.get_access_token()
+            if not token:
+                return None
+            
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Accept': 'application/json'
+            }
+            
+            # 사이트 정보 가져오기
+            site_url = f"https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/{site_name}"
+            response = requests.get(site_url, headers=headers)
+            response.raise_for_status()
+            
+            site_info = response.json()
+            return site_info['id']
+            
+        except Exception as e:
+            st.error(f"❌ 사이트 ID 획득 실패: {e}")
+            return None
+    
+    def download_file_from_sharepoint(self, file_url: str) -> Optional[bytes]:
+        """SharePoint 파일 다운로드"""
+        try:
+            token = self.get_access_token()
+            if not token:
+                return None
+            
+            # SharePoint 파일 URL에서 파일 ID 추출
+            site_name = st.secrets["sharepoint_files"]["site_name"]
+            file_name = st.secrets["sharepoint_files"]["file_name"]
+            
+            site_id = self.get_site_id(site_name)
+            if not site_id:
+                return None
+            
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Accept': 'application/json'
+            }
+            
+            # 드라이브 정보 가져오기
+            drives_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
+            drives_response = requests.get(drives_url, headers=headers)
+            drives_response.raise_for_status()
+            
+            drives = drives_response.json()['value']
+            if not drives:
+                st.error("❌ SharePoint 드라이브를 찾을 수 없습니다")
+                return None
+            
+            drive_id = drives[0]['id']  # 첫 번째 드라이브 사용
+            
+            # 파일 검색
+            search_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{file_name}')"
+            search_response = requests.get(search_url, headers=headers)
+            search_response.raise_for_status()
+            
+            search_results = search_response.json()['value']
+            if not search_results:
+                st.error(f"❌ 파일 '{file_name}'을 찾을 수 없습니다")
+                return None
+            
+            # 첫 번째 검색 결과 사용
+            file_item = search_results[0]
+            download_url = file_item['@microsoft.graph.downloadUrl']
+            
+            st.info(f"📁 파일 발견: {file_item['name']} (크기: {file_item['size']:,} bytes)")
+            
+            # 파일 다운로드
+            file_response = requests.get(download_url)
+            file_response.raise_for_status()
+            
+            st.success("📥 SharePoint 파일 다운로드 완료!")
+            return file_response.content
+            
+        except Exception as e:
+            st.error(f"❌ SharePoint 파일 다운로드 실패: {e}")
+            return None
+    
+    def get_file_info(self, file_url: str) -> Optional[Dict]:
+        """SharePoint 파일 정보 조회"""
+        try:
+            token = self.get_access_token()
+            if not token:
+                return None
+            
+            site_name = st.secrets["sharepoint_files"]["site_name"]
+            file_name = st.secrets["sharepoint_files"]["file_name"]
+            
+            site_id = self.get_site_id(site_name)
+            if not site_id:
+                return None
+            
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Accept': 'application/json'
+            }
+            
+            # 드라이브 정보 가져오기
+            drives_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
+            drives_response = requests.get(drives_url, headers=headers)
+            drives_response.raise_for_status()
+            
+            drives = drives_response.json()['value']
+            if drives:
+                drive_id = drives[0]['id']
+                
+                # 파일 검색
+                search_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{file_name}')"
+                search_response = requests.get(search_url, headers=headers)
+                search_response.raise_for_status()
+                
+                search_results = search_response.json()['value']
+                if search_results:
+                    file_item = search_results[0]
+                    return {
+                        'name': file_item['name'],
+                        'size': file_item['size'],
+                        'last_modified': file_item['lastModifiedDateTime'],
+                        'created': file_item['createdDateTime']
+                    }
+            
+            return None
+            
+        except Exception as e:
+            st.error(f"❌ 파일 정보 조회 실패: {e}")
+            return None
+
+def validate_file_size(file_content: bytes, max_mb: int = 100) -> bool:
     """파일 크기 검증"""
     try:
-        size_mb = len(file_obj.getvalue()) / (1024 * 1024)
+        size_mb = len(file_content) / (1024 * 1024)
         if size_mb > max_mb:
             st.error(f"❌ 파일이 너무 큽니다: {size_mb:.1f}MB > {max_mb}MB")
             return False
@@ -667,38 +844,93 @@ def main():
         layout="wide"
     )
     
-    st.title("🏭 BOM 원가 계산기 (경량 안정성 버전)")
-    st.markdown("**✨ 핵심 기능에 집중한 안정적이고 가벼운 버전**")
+    st.title("🏭 BOM 원가 계산기 (SharePoint 연동 버전)")
+    st.markdown("**🔗 SharePoint에서 BOM 데이터를 자동으로 가져와 계산하는 버전**")
     
     # 기능 상태 표시
     with st.sidebar:
         st.header("📊 시스템 상태")
         st.info(f"""
         **활성화된 기능:**
+        - SharePoint 연동: ✅
         - 진행률 표시: {'✅' if HAS_PROGRESS else '❌'}
         - 시각화: {'✅' if HAS_PLOTLY else '❌'}
         """)
+        
+        # SharePoint 설정 확인
+        try:
+            tenant_id = st.secrets["sharepoint"]["tenant_id"]
+            st.success("🔑 SharePoint 설정 확인됨")
+        except:
+            st.error("❌ SharePoint 설정이 없습니다")
     
-    # 파일 업로드
-    st.header("1. 📁 파일 업로드")
+    # SharePoint 클라이언트 초기화
+    sharepoint_client = SharePointClient()
+    
+    # 파일 업로드 및 SharePoint 데이터 로딩
+    st.header("1. 📁 데이터 소스")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        bom_file = st.file_uploader("📋 BOM 데이터 파일", type=['csv', 'xlsx', 'xls'], key="bom")
+        st.subheader("📋 BOM 데이터 (SharePoint)")
         
+        # SharePoint 파일 정보 표시
+        if st.button("🔍 SharePoint BOM 파일 확인", type="secondary"):
+            with st.spinner("SharePoint 연결 중..."):
+                file_url = st.secrets["sharepoint_files"]["bom_file_url"]
+                file_info = sharepoint_client.get_file_info(file_url)
+                
+                if file_info:
+                    st.success("✅ SharePoint 파일 확인 완료!")
+                    st.info(f"""
+                    **파일 정보:**
+                    - 파일명: {file_info['name']}
+                    - 크기: {file_info['size']:,} bytes
+                    - 수정일: {file_info['last_modified'][:19]}
+                    """)
+                else:
+                    st.error("❌ SharePoint 파일을 찾을 수 없습니다")
+        
+        # BOM 데이터 로딩 버튼
+        if st.button("📥 SharePoint에서 BOM 데이터 가져오기", type="primary"):
+            with st.spinner("SharePoint에서 BOM 데이터 다운로드 중..."):
+                file_url = st.secrets["sharepoint_files"]["bom_file_url"]
+                bom_content = sharepoint_client.download_file_from_sharepoint(file_url)
+                
+                if bom_content and validate_file_size(bom_content):
+                    # 세션 상태에 저장
+                    st.session_state['bom_content'] = bom_content
+                    st.session_state['bom_filename'] = st.secrets["sharepoint_files"]["file_name"]
+                    st.success("✅ BOM 데이터 로딩 완료!")
+                else:
+                    st.error("❌ BOM 데이터 로딩 실패")
+        
+        # 로딩된 BOM 데이터 표시
+        if 'bom_content' in st.session_state:
+            st.success(f"📋 BOM 데이터 준비됨: {st.session_state['bom_filename']}")
+    
     with col2:
+        st.subheader("💰 구매 데이터 (파일 업로드)")
         purchase_file = st.file_uploader("💰 구매 데이터 파일", type=['csv', 'xlsx', 'xls'], key="purchase")
     
-    if bom_file and purchase_file:
+    # 데이터 처리 및 계산
+    if 'bom_content' in st.session_state and purchase_file:
         
         # 파일 크기 확인
-        if not validate_file_size(bom_file) or not validate_file_size(purchase_file):
+        if not validate_file_size(purchase_file):
             st.stop()
         
         # 파일 로딩
-        with st.spinner("📖 파일 로딩 중..."):
-            bom_df = safe_load_data(bom_file.getvalue(), bom_file.name, skiprows=1)
+        with st.spinner("📖 데이터 로딩 중..."):
+            # BOM 데이터 (SharePoint)
+            bom_df = safe_load_data(
+                st.session_state['bom_content'], 
+                st.session_state['bom_filename'], 
+                skiprows=1
+            )
+            
+            # 구매 데이터 (파일 업로드)
             purchase_df = safe_load_data(purchase_file.getvalue(), purchase_file.name)
         
         if bom_df is None or purchase_df is None:
@@ -716,7 +948,7 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("📋 BOM 데이터")
+            st.subheader("📋 BOM 데이터 (SharePoint)")
             st.info(f"📊 {len(bom_df):,}행 × {len(bom_df.columns)}열")
             st.dataframe(bom_df.head(3), use_container_width=True)
             
@@ -859,7 +1091,7 @@ def main():
                 st.download_button(
                     label="📊 BOM 원가 계산 결과 다운로드 (Excel)",
                     data=excel_data,
-                    file_name=f'BOM원가계산_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx',
+                    file_name=f'BOM원가계산_SharePoint_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     use_container_width=True
                 )
@@ -869,7 +1101,7 @@ def main():
                 st.download_button(
                     label="📄 완제품 원가 결과 다운로드 (CSV)",
                     data=csv_data,
-                    file_name=f'BOM원가계산_{datetime.now().strftime("%Y%m%d_%H%M")}.csv',
+                    file_name=f'BOM원가계산_SharePoint_{datetime.now().strftime("%Y%m%d_%H%M")}.csv',
                     mime='text/csv',
                     use_container_width=True
                 )
@@ -878,30 +1110,31 @@ def main():
             st.success("🎉 BOM 원가 계산 완료!")
     
     else:
-        st.info("👆 BOM 데이터와 구매 데이터 파일을 모두 업로드해주세요.")
+        st.info("👆 SharePoint에서 BOM 데이터를 가져오고, 구매 데이터 파일을 업로드해주세요.")
         
         # 간단한 사용법
         with st.expander("📖 사용법", expanded=True):
             st.markdown("""
-            ### 📋 필수 데이터 형식
+            ### 🔗 SharePoint 연동 방식
             
-            **BOM 데이터 (필수 컬럼):**
-            - `생산품목코드`: 생산할 제품 코드
-            - `생산품목명`: 제품명 (완제품은 '[완제품]' 포함)
-            - `소모품목코드`: 필요한 부품 코드
-            - `소모품목명`: 부품명
-            - `소요량`: 필요 수량 (숫자)
+            **1. BOM 데이터 (SharePoint 자동 연동):**
+            - Azure AD 앱 등록 및 권한 설정 완료
+            - SharePoint 파일을 자동으로 가져옴
+            - 필수 컬럼: 생산품목코드, 생산품목명, 소모품목코드, 소모품목명, 소요량
             
-            **구매 데이터 (자동 감지):**
-            - 일자 관련 컬럼 (일자-No. 등)
-            - 품목코드 컬럼
-            - 단가 컬럼
+            **2. 구매 데이터 (파일 업로드):**
+            - CSV, Excel 파일 지원
+            - 자동 헤더 감지 (일자, 품목코드, 단가)
             
             ### ⚡ 주요 특징
-            - 🎯 **핵심 기능 집중**: 필수 기능만으로 경량화
-            - 🛡️ **안정성 강화**: 오류 방지 및 안전한 처리
-            - 🔄 **다단계 BOM**: 중간재 포함 복잡한 구조 지원
-            - 📊 **실시간 피드백**: 진행률 및 상태 표시
+            - 🔗 **SharePoint 연동**: BOM 데이터 실시간 동기화
+            - 🛡️ **Azure AD 인증**: 안전한 데이터 접근
+            - 🎯 **자동화**: 수동 업로드 없이 최신 데이터 활용
+            - 📊 **실시간 분석**: 진행률 및 결과 시각화
+            
+            ### 🔐 필수 설정 (Streamlit Secrets)
+            - SharePoint 테넌트, 클라이언트 ID/Secret
+            - Azure AD API 권한: Files.Read.All, Sites.Read.All
             """)
 
 if __name__ == "__main__":
