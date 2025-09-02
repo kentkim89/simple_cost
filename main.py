@@ -52,7 +52,7 @@ def validate_file_size(file_obj, max_mb: int = 100) -> bool:
         return False
 
 def load_from_sharepoint_url(url: str, file_type: str = "unknown") -> Optional[pd.DataFrame]:
-    """SharePoint 직접 링크로 파일 로딩"""
+    """SharePoint 직접 링크로 파일 로딩 (인증 문제 해결)"""
     try:
         if not url or not url.strip():
             return None
@@ -60,85 +60,157 @@ def load_from_sharepoint_url(url: str, file_type: str = "unknown") -> Optional[p
         url = url.strip()
         
         # SharePoint URL 형식 확인 및 변환
+        download_url = url
         if 'sharepoint.com' in url:
-            # 공유 링크 형태 변환 (예: https://company.sharepoint.com/:x:/s/site/...)
+            # 공유 링크 형태 변환
             if '/:x:/' in url or '/:b:/' in url or '/:w:/' in url:
-                # 공유 링크를 다운로드 링크로 변환
                 if '?e=' in url:
                     base_url = url.split('?e=')[0]
                     download_url = base_url + '?download=1'
                 else:
                     download_url = url + ('&' if '?' in url else '?') + 'download=1'
-            
-            # Excel Online 링크 변환
             elif '?web=1' in url:
                 download_url = url.replace('?web=1', '?download=1')
-            
-            # 일반 SharePoint 문서 링크
             elif '/Documents/' in url or '/Shared%20Documents/' in url:
                 download_url = url + ('&' if '?' in url else '?') + 'download=1'
-            
-            # 기타 SharePoint 링크
             else:
                 download_url = url + ('&' if '?' in url else '?') + 'download=1'
-        else:
-            download_url = url
         
-        st.info(f"SharePoint 링크 처리 중: {file_type} 데이터")
+        st.info(f"SharePoint 파일 접근 시도 중...")
         
         # 파일 다운로드 및 로딩
         skiprows = 1 if file_type == "bom" else 0
         
-        # 요청 헤더 추가 (SharePoint 호환성 향상)
         if not HAS_REQUESTS:
-            st.error("requests 라이브러리가 필요합니다. 'pip install requests' 실행 후 다시 시도하세요.")
+            st.error("requests 라이브러리가 필요합니다.")
             return None
             
         import requests
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
         
-        # requests를 사용하여 파일 다운로드
-        response = requests.get(download_url, headers=headers, allow_redirects=True)
-        response.raise_for_status()
+        # 여러 방법으로 시도
+        methods = [
+            # 방법 1: 기본 다운로드 링크
+            {'url': download_url, 'headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}},
+            
+            # 방법 2: 원본 링크 직접 접근
+            {'url': url, 'headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}},
+            
+            # 방법 3: 익명 접근 시도
+            {'url': url.replace(':x:', ':v:'), 'headers': {'User-Agent': 'Microsoft Excel'}},
+        ]
         
-        # 바이트 데이터를 pandas로 읽기
-        file_content = io.BytesIO(response.content)
-        df = pd.read_excel(file_content, skiprows=skiprows, dtype=str, na_values=['', 'NULL', 'null', 'NaN', 'nan'])
+        for i, method in enumerate(methods, 1):
+            try:
+                st.info(f"접근 방법 {i} 시도 중...")
+                
+                response = requests.get(
+                    method['url'], 
+                    headers=method['headers'], 
+                    allow_redirects=True,
+                    timeout=30
+                )
+                
+                # 상태 코드 확인
+                if response.status_code == 200:
+                    # 응답 내용이 HTML인지 확인 (로그인 페이지 등)
+                    content_type = response.headers.get('content-type', '').lower()
+                    
+                    if 'html' in content_type:
+                        st.warning(f"방법 {i}: HTML 응답 (로그인 페이지일 가능성)")
+                        continue
+                        
+                    # Excel 파일 시도
+                    try:
+                        file_content = io.BytesIO(response.content)
+                        
+                        # 파일 시그니처 확인
+                        file_content.seek(0)
+                        first_bytes = file_content.read(8)
+                        file_content.seek(0)
+                        
+                        # Excel 파일 시그니처 확인
+                        if first_bytes[:2] == b'PK' or first_bytes[:4] == b'\xd0\xcf\x11\xe0':
+                            df = pd.read_excel(file_content, skiprows=skiprows, dtype=str, engine='openpyxl')
+                        else:
+                            st.warning(f"방법 {i}: Excel 파일이 아닌 것으로 보임")
+                            continue
+                            
+                        if df is not None and not df.empty:
+                            # 데이터 정제
+                            for col in df.select_dtypes(include=['object']).columns:
+                                df[col] = df[col].astype(str).str.strip()
+                            
+                            # 빈 행/열 제거
+                            df = df.dropna(how='all').dropna(axis=1, how='all')
+                            
+                            st.success(f"SharePoint 파일 로딩 성공 (방법 {i}): {len(df)}행 × {len(df.columns)}열")
+                            return df
+                            
+                    except Exception as e:
+                        st.warning(f"방법 {i}: Excel 파일 파싱 실패 - {e}")
+                        continue
+                        
+                else:
+                    st.warning(f"방법 {i}: HTTP {response.status_code} 오류")
+                    
+            except Exception as e:
+                st.warning(f"방법 {i}: 연결 실패 - {e}")
+                continue
         
-        if df is not None and not df.empty:
-            # 데이터 정제
-            for col in df.select_dtypes(include=['object']).columns:
-                df[col] = df[col].astype(str).str.strip()
-            
-            # 빈 행/열 제거
-            df = df.dropna(how='all').dropna(axis=1, how='all')
-            
-            st.success(f"SharePoint 파일 로딩 성공: {len(df)}행 × {len(df.columns)}열")
-            return df
-        else:
-            st.error("파일이 비어있거나 읽을 수 없습니다.")
-            return None
-            
-    except requests.exceptions.RequestException as e:
-        st.error(f"SharePoint 파일 다운로드 실패: {e}")
-        st.write("**가능한 원인:**")
-        st.write("1. 파일 권한이 '조직 내 사용자' 이상으로 설정되지 않음")
-        st.write("2. SharePoint 링크가 만료되었거나 잘못됨")
-        st.write("3. 네트워크 연결 문제")
-        st.write("**해결 방법:**")
-        st.write("- SharePoint에서 파일 다시 공유하여 새 링크 생성")
-        st.write("- '조직 내 모든 사용자가 액세스 가능' 권한으로 설정")
+        # 모든 방법 실패
+        st.error("모든 접근 방법이 실패했습니다.")
+        show_sharepoint_alternatives()
         return None
-        
+            
     except Exception as e:
-        st.error(f"파일 처리 중 오류 발생: {e}")
-        st.write("**해결 방법:**")
-        st.write("1. Excel 파일 형식 확인 (.xlsx 또는 .xls)")
-        st.write("2. 파일이 손상되지 않았는지 확인")
-        st.write("3. 파일 업로드 방식으로 대신 시도")
+        st.error(f"SharePoint 파일 처리 중 오류: {e}")
+        show_sharepoint_alternatives()
         return None
+
+def show_sharepoint_alternatives():
+    """SharePoint 접근 실패시 대안 제시"""
+    st.write("---")
+    st.subheader("🔐 SharePoint 접근 문제 해결 방법")
+    
+    with st.expander("해결 방법들", expanded=True):
+        st.markdown("""
+        ### 🎯 즉시 해결 방법 (추천)
+        
+        **1. 파일 다운로드 후 업로드**
+        - SharePoint에서 BOM 파일을 로컬로 다운로드
+        - 아래 '임시 BOM 파일 업로드' 사용
+        
+        **2. 링크 권한 변경**
+        - SharePoint에서 파일 우클릭 → '공유'
+        - '링크 설정 변경' → '조직 내 모든 사용자'
+        - '권한' → '편집 가능' 또는 '보기 가능' 선택
+        
+        ### 🔧 근본적 해결 (IT 팀 협업 필요)
+        
+        **3. 서비스 계정 설정**
+        - Azure AD 앱 등록 및 권한 부여
+        - Microsoft Graph API 인증 구성
+        - 자동 인증으로 파일 접근
+        
+        **4. 공용 폴더 설정**
+        - SharePoint에 BOM 전용 공용 폴더 생성
+        - 조직 내 모든 사용자 읽기 권한 부여
+        """)
+    
+    # 임시 해결책: BOM 파일 업로드 옵션 추가
+    st.subheader("🆘 임시 해결: BOM 파일 업로드")
+    
+    temp_bom_file = st.file_uploader(
+        "SharePoint 접근이 안 되는 경우, BOM 파일을 직접 업로드하세요",
+        type=['csv', 'xlsx', 'xls'],
+        key="temp_bom",
+        help="SharePoint에서 다운로드한 BOM 파일을 여기에 업로드"
+    )
+    
+    if temp_bom_file:
+        return safe_load_data(temp_bom_file.getvalue(), temp_bom_file.name, skiprows=1)
+    
+    return None
 
 def safe_load_data(file_content: bytes, file_name: str, skiprows: int = 0) -> Optional[pd.DataFrame]:
     """안전한 파일 로딩"""
@@ -756,7 +828,7 @@ def main():
     st.subheader("BOM 데이터 (SharePoint)")
     
     # 기본 SharePoint 링크
-    default_bom_url = "https://goremi.sharepoint.com/:x:/s/data/EeSY2icSY1tMqngy6KJoP4MBbY_ynMyu0-4aC-8PHkEF_A?e=bfT3Xv"
+    default_bom_url = "https://goremi-my.sharepoint.com/:x:/g/personal/chkim_goremi_co_kr/EZlSRwjY6dNItnv6EL0H_esBtLEQl70PED-59C_iQzd0OQ?e=FE79vq"
     
     bom_url = st.text_input(
         "BOM 데이터 SharePoint 링크",
@@ -772,7 +844,12 @@ def main():
             if bom_df is not None:
                 st.success(f"BOM 데이터 로드 완료: {len(bom_df):,}행 × {len(bom_df.columns)}열")
             else:
-                st.error("BOM 데이터 로딩 실패")
+                st.error("SharePoint BOM 데이터 로딩 실패")
+                # 임시 해결책 제공
+                temp_bom = show_sharepoint_alternatives()
+                if temp_bom is not None:
+                    bom_df = temp_bom
+                    st.success("임시 BOM 파일 업로드 완료!")
     
     # 구매 데이터 (파일 업로드)
     st.subheader("구매 데이터 (파일 업로드)")
