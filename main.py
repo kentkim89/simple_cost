@@ -43,29 +43,50 @@ def load_sharepoint_file():
         # 토큰 획득
         token = get_sharepoint_token()
         if not token:
-            return None
+            return load_direct_url()
         
         headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/json'
         }
         
-        # 여러 Graph API URL 시도
-        urls_to_try = [
-            "https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/data:/drive/root/children",
-            "https://graph.microsoft.com/v1.0/sites?search=data"
+        # 실제 파일 다운로드 시도
+        file_urls = [
+            # 방법 1: 직접 파일 경로
+            "https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/data:/drive/root:/BOM_Data.xlsx:/content",
+            "https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/data:/drive/root:/Shared Documents/BOM_Data.xlsx:/content",
+            # 방법 2: 다른 파일명들
+            "https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/data:/drive/root:/bom.xlsx:/content",
+            "https://graph.microsoft.com/v1.0/sites/goremi.sharepoint.com:/sites/data:/drive/root:/BOM.xlsx:/content"
         ]
         
-        st.info("SharePoint 사이트 정보 조회 중...")
+        st.info("Graph API로 파일 다운로드 시도 중...")
         
-        for url in urls_to_try:
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                st.success("Graph API 연결 성공!")
-                # 실제 파일 다운로드는 여기서 구현 가능
-                return None  # 현재는 사이트 접근 확인만
+        for i, file_url in enumerate(file_urls, 1):
+            try:
+                st.info(f"방법 {i}: 파일 다운로드 시도...")
+                response = requests.get(file_url, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    file_content = io.BytesIO(response.content)
+                    df = pd.read_excel(file_content, skiprows=1, dtype=str, engine='openpyxl')
+                    
+                    # 데이터 정제
+                    for col in df.select_dtypes(include=['object']).columns:
+                        df[col] = df[col].astype(str).str.strip()
+                    
+                    df = df.dropna(how='all').dropna(axis=1, how='all')
+                    
+                    st.success(f"Graph API로 파일 다운로드 성공: {len(df)}행")
+                    return df
+                else:
+                    st.warning(f"방법 {i} 실패: {response.status_code}")
+            except Exception as e:
+                st.warning(f"방법 {i} 오류: {e}")
+                continue
         
-        st.warning("Graph API 접근 실패 - 직접 URL 시도")
+        # 모든 Graph API 방법 실패시 직접 URL 시도
+        st.warning("Graph API 실패 - 직접 URL 시도")
         return load_direct_url()
             
     except Exception as e:
@@ -314,14 +335,35 @@ def main():
     st.set_page_config(page_title="BOM 원가 계산기", layout="wide")
     st.title("BOM 원가 계산기 (SharePoint 연동)")
     
-    # BOM 데이터 로드
+    # 자동으로 BOM 데이터 로드 시도
+    if 'bom_data' not in st.session_state:
+        with st.spinner("SharePoint에서 BOM 데이터 자동 로드 중..."):
+            bom_df = load_sharepoint_file()
+            if bom_df is not None:
+                st.session_state.bom_data = bom_df
+                st.success(f"BOM 데이터 자동 로드 완료: {len(bom_df):,}행")
+    
+    # BOM 데이터 상태 표시
     st.header("1. BOM 데이터 (SharePoint)")
     
-    if st.button("SharePoint에서 BOM 데이터 로드"):
-        bom_df = load_sharepoint_file()
-        if bom_df is not None:
-            st.session_state.bom_data = bom_df
+    if 'bom_data' in st.session_state:
+        bom_df = st.session_state.bom_data
+        st.success(f"BOM 데이터 로드됨: {len(bom_df):,}행 × {len(bom_df.columns)}열")
+        
+        # 수동 새로고침 버튼
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("새로고침"):
+                del st.session_state.bom_data
+                st.rerun()
+        
+        # BOM 데이터 미리보기
+        with st.expander("BOM 데이터 미리보기", expanded=False):
             st.dataframe(bom_df.head(), use_container_width=True)
+    else:
+        st.error("BOM 데이터 로드 실패")
+        if st.button("재시도"):
+            st.rerun()
     
     # 구매 데이터 업로드
     st.header("2. 구매 데이터")
@@ -331,8 +373,10 @@ def main():
     if purchase_file:
         try:
             purchase_df = pd.read_excel(purchase_file, dtype=str, engine='openpyxl')
-            st.success(f"구매 데이터 로드: {len(purchase_df)}행")
-            st.dataframe(purchase_df.head(), use_container_width=True)
+            st.success(f"구매 데이터 로드: {len(purchase_df):,}행")
+            
+            with st.expander("구매 데이터 미리보기", expanded=False):
+                st.dataframe(purchase_df.head(), use_container_width=True)
         except Exception as e:
             st.error(f"구매 데이터 로드 실패: {e}")
     
@@ -417,11 +461,10 @@ def main():
             else:
                 st.warning("완제품 데이터가 없습니다.")
     
-    else:
-        if 'bom_data' not in st.session_state:
-            st.info("먼저 SharePoint에서 BOM 데이터를 로드하세요.")
-        if purchase_df is None:
-            st.info("구매 데이터 파일을 업로드하세요.")
+    elif 'bom_data' not in st.session_state:
+        st.info("BOM 데이터 로드를 기다리는 중...")
+    elif purchase_df is None:
+        st.info("구매 데이터 파일을 업로드하세요.")
 
 if __name__ == "__main__":
     main()
